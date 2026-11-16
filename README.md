@@ -37,7 +37,7 @@ Not yet tested: a contract calling a circuit chosen at claim time inside one tra
 ## Known limits
 
 - A circuit can memorise fixed test inputs. The challenge window and reference comparison are the defence; small jobs can test every input.
-- TapeOut can upgrade the processor contracts that run circuits. Lathe inherits that trust.
+- Who can change the circuit runner: the processor factory is owned by a 3-of-5 multisig and is not sealed; the circuit beacon's owner is the zero address (read-only check, Nov 15 2026). We have not audited every upgrade path, so Lathe pins and inspects the exact processor before any job takes money.
 - Lathe takes a small fee on each paid job. Rate not set.
 
 ## Roadmap to Dec 7
