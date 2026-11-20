@@ -5,6 +5,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {TableLib} from "./TableLib.sol";
+import {BitLib} from "./BitLib.sol";
+import {IProcessor, IProcessorFactory} from "./ITapeOut.sol";
 
 /// @title LatheOrders
 /// @notice A buyer locks USD₮0 for a truth table. A builder delivers a TapeOut circuit. The contract runs
@@ -32,6 +34,15 @@ contract LatheOrders is ReentrancyGuard {
         Status status;
     }
 
+    struct Delivery {
+        address processor;
+        uint256 circuitId;
+        address builder; // who delivered; the one paid
+        uint32 gateCount; // recorded at delivery; check reverts if it changes
+        bytes32 netlistHash; // keccak256(netlist(circuitId)) at delivery; same rule
+        uint32 nextCase; // the next case check will run
+    }
+
     uint256 public constant GRACE = 1 days;
     uint16 public constant MAX_FEE_BPS = 500;
     uint256 public constant MAX_CASE_BITS = 6; // nIn + nState <= 6, so at most 64 cases
@@ -45,8 +56,12 @@ contract LatheOrders is ReentrancyGuard {
     uint256 public nextOrderId = 1;
     mapping(uint256 => Order) public orders;
     mapping(uint256 => bytes) public tableOf;
+    mapping(uint256 => Delivery) public deliveries;
 
     event OrderCreated(uint256 indexed orderId, address indexed buyer, uint96 amount, uint64 deadline);
+    event Delivered(uint256 indexed orderId, address indexed builder, address processor, uint256 circuitId);
+    event Rejected(uint256 indexed orderId, uint256 caseIndex);
+    event Paid(uint256 indexed orderId, address indexed builder, address processor, uint256 circuitId);
 
     error FeeTooHigh();
     error ZeroAddress();
@@ -56,6 +71,16 @@ contract LatheOrders is ReentrancyGuard {
     error DeadlinePassed();
     error ZeroAmount();
     error ReceivedLessThanAmount();
+    error NoSuchOrder();
+    error NotOpen();
+    error NotChecking();
+    error NotProcessor();
+    error NotBuilder();
+    error NotCircuitOwner();
+    error ShapeMismatch();
+    error TooManyGates();
+    error CircuitChanged();
+    error EvalOutOfGas();
 
     constructor(address factory_, address usdt_, address feeRecipient_, uint16 feeBps_) {
         if (feeBps_ > MAX_FEE_BPS) revert FeeTooHigh();
@@ -115,5 +140,104 @@ contract LatheOrders is ReentrancyGuard {
         uint256 before = usdt.balanceOf(address(this));
         usdt.safeTransferFrom(msg.sender, address(this), amount);
         if (usdt.balanceOf(address(this)) - before != amount) revert ReceivedLessThanAmount();
+    }
+
+    /// @notice Offer circuit `circuitId` on `processor` for order `orderId`. The caller must own the circuit.
+    function deliver(uint256 orderId, address processor, uint256 circuitId) external nonReentrant {
+        Order storage o = orders[orderId];
+        if (o.buyer == address(0)) revert NoSuchOrder();
+        if (o.status != Status.Open) revert NotOpen();
+        if (block.timestamp > o.deadline) revert DeadlinePassed();
+        if (!IProcessorFactory(factory).isCPU(processor)) revert NotProcessor();
+        if (o.builder != address(0) && msg.sender != o.builder) revert NotBuilder();
+        // ownerOf reverts for an id that does not exist; treat that as "not yours".
+        try IProcessor(processor).ownerOf(circuitId) returns (address owner) {
+            if (owner != msg.sender) revert NotCircuitOwner();
+        } catch {
+            revert NotCircuitOwner();
+        }
+        (uint32 nIn, uint32 nOut, uint32 nState, uint32 gates) = IProcessor(processor).circuitInfo(circuitId);
+        if (nIn != o.nIn || nOut != o.nOut || nState != o.nState) revert ShapeMismatch();
+        if (o.maxGates != 0 && gates > o.maxGates) revert TooManyGates();
+
+        deliveries[orderId] = Delivery({
+            processor: processor,
+            circuitId: circuitId,
+            builder: msg.sender,
+            gateCount: gates,
+            netlistHash: keccak256(IProcessor(processor).netlist(circuitId)),
+            nextCase: 0
+        });
+        o.status = Status.Checking;
+        emit Delivered(orderId, msg.sender, processor, circuitId);
+    }
+
+    /// @notice Run up to `maxCases` more cases of a delivered circuit. Anyone may call.
+    /// @return done true when the check finished (passed or rejected) in this call.
+    /// @return passed true when every case matched and the builder was paid.
+    function check(uint256 orderId, uint256 maxCases) external nonReentrant returns (bool done, bool passed) {
+        Order storage o = orders[orderId];
+        if (o.status != Status.Checking) revert NotChecking();
+        Delivery storage d = deliveries[orderId];
+        _requireUnchanged(o, d);
+
+        uint256 total = uint256(1) << o.nIn;
+        uint256 c = d.nextCase;
+        uint256 end = maxCases >= total - c ? total : c + maxCases;
+        bytes memory table = tableOf[orderId];
+
+        for (; c < end; ++c) {
+            if (!_caseMatches(IProcessor(d.processor), d.circuitId, c, o.nIn, o.nOut, table)) {
+                delete deliveries[orderId];
+                o.status = Status.Open;
+                emit Rejected(orderId, c);
+                return (true, false);
+            }
+        }
+        d.nextCase = uint32(c);
+        if (c < total) return (false, false);
+
+        _pay(orderId, o, d);
+        return (true, true);
+    }
+
+    /// @dev The processor is upgradeable; refuse to judge a circuit that is no longer the one delivered.
+    function _requireUnchanged(Order storage o, Delivery storage d) internal view {
+        IProcessor p = IProcessor(d.processor);
+        (uint32 nIn, uint32 nOut, uint32 nState, uint32 gates) = p.circuitInfo(d.circuitId);
+        if (gates != d.gateCount || nIn != o.nIn || nOut != o.nOut || nState != o.nState) revert CircuitChanged();
+        if (keccak256(p.netlist(d.circuitId)) != d.netlistHash) revert CircuitChanged();
+    }
+
+    /// @dev Status first, then the transfers (checks-effects-interactions). Fee rounds down.
+    function _pay(uint256 orderId, Order storage o, Delivery storage d) internal {
+        o.status = Status.Paid;
+        address payee = d.builder;
+        uint256 fee = uint256(o.amount) * feeBps / 10_000;
+        emit Paid(orderId, payee, d.processor, d.circuitId);
+        usdt.safeTransfer(payee, o.amount - fee);
+        if (fee > 0) usdt.safeTransfer(feeRecipient, fee);
+    }
+
+    /// @dev One case. A revert inside eval counts as a wrong answer, except when eval ran out of gas: then the
+    /// whole call reverts, so a caller who sends too little gas cannot get an honest delivery rejected.
+    function _caseMatches(
+        IProcessor p,
+        uint256 id,
+        uint256 c,
+        uint256 nIn,
+        uint256 nOut,
+        bytes memory table
+    ) internal view returns (bool) {
+        bytes memory inputs = BitLib.pack(c, nIn);
+        uint256 gasBefore = gasleft();
+        try p.eval(id, inputs) returns (bytes memory out) {
+            if (out.length < (nOut + 7) / 8) return false;
+            return BitLib.lowBits(out, nOut) == TableLib.expected(table, c, nOut);
+        } catch {
+            // After a call runs out of gas, at most 1/64 of the gas before it is left (EIP-150).
+            if (gasleft() <= gasBefore / 63) revert EvalOutOfGas();
+            return false;
+        }
     }
 }
