@@ -85,6 +85,7 @@ contract LatheOrders is ReentrancyGuard {
     error TooManyCases();
     error TooManyOutputs();
     error WrongTableLength();
+    error TablePaddingNotZero();
     error DeadlinePassed();
     error ZeroAmount();
     error ReceivedLessThanAmount();
@@ -138,7 +139,12 @@ contract LatheOrders is ReentrancyGuard {
         if (uint256(nIn) + nState > MAX_CASE_BITS) revert TooManyCases();
         if (nOut == 0 || uint256(nOut) + nState > MAX_ANSWER_BITS) revert TooManyOutputs();
         uint256 cases = uint256(1) << (uint256(nIn) + nState);
+        uint256 tableBits = cases * (uint256(nOut) + nState);
         if (table.length != TableLib.byteLength(cases, uint256(nOut) + nState)) revert WrongTableLength();
+        // Unused high bits of the last byte must be zero, so each rule has exactly one valid table.
+        if (tableBits % 8 != 0 && uint8(table[table.length - 1]) >> (tableBits % 8) != 0) {
+            revert TablePaddingNotZero();
+        }
         if (deadline <= block.timestamp) revert DeadlinePassed();
         if (amount == 0) revert ZeroAmount();
 

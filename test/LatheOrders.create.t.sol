@@ -64,6 +64,25 @@ contract LatheOrdersCreateTest is LatheBase {
         vm.stopPrank();
     }
 
+    /// FIX 3: bits past the last answer must be zero, so one rule has exactly one table (and one hash).
+    function test_create_rejectsNonZeroTablePadding() public {
+        vm.startPrank(buyer);
+        // XOR uses 4 bits; 0xf6 sets the 4 unused high bits
+        vm.expectRevert(LatheOrders.TablePaddingNotZero.selector);
+        lathe.createOrder(2, 1, hex"f6", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        // only the top bit set is still padding
+        vm.expectRevert(LatheOrders.TablePaddingNotZero.selector);
+        lathe.createOrder(2, 1, hex"86", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        // 2 inputs x 3 outputs = 12 bits: 0xd5 0x01 ok, 0xd5 0x11 has a padding bit
+        vm.expectRevert(LatheOrders.TablePaddingNotZero.selector);
+        lathe.createOrder(2, 3, hex"d511", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 1, hex"06", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 3, hex"d501", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        // a whole number of bytes has no padding: every bit value is allowed
+        lathe.createOrder(6, 1, hex"ffffffffffffffff", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        vm.stopPrank();
+    }
+
     function test_create_rejectsPastDeadline() public {
         vm.startPrank(buyer);
         vm.expectRevert(LatheOrders.DeadlinePassed.selector);
