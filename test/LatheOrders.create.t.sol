@@ -33,34 +33,42 @@ contract LatheOrdersCreateTest is LatheBase {
         vm.expectEmit(true, true, false, true);
         emit LatheOrders.OrderCreated(1, buyer, AMOUNT, dl);
         vm.prank(buyer);
-        lathe.createOrder(2, 1, xorTable(), AMOUNT, dl, address(0), 0);
+        lathe.createOrder(2, 1, xorTable(), AMOUNT, dl, builder, 0);
+    }
+
+    /// Every order names its builder. An open order (builder = zero) let anyone copy or wrap the honest
+    /// builder's minted circuit, mint their own copy, and deliver first.
+    function test_create_rejectsZeroBuilder() public {
+        vm.prank(buyer);
+        vm.expectRevert(LatheOrders.BuilderRequired.selector);
+        lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1 days), address(0), 0);
     }
 
     function test_create_rejectsTooManyInputs() public {
         vm.prank(buyer);
         vm.expectRevert(LatheOrders.TooManyCases.selector);
-        lathe.createOrder(7, 1, new bytes(16), AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(7, 1, new bytes(16), AMOUNT, uint64(block.timestamp + 1), builder, 0);
     }
 
     function test_create_rejectsTooManyOutputs() public {
         vm.prank(buyer);
         vm.expectRevert(LatheOrders.TooManyOutputs.selector);
-        lathe.createOrder(1, 17, new bytes(5), AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(1, 17, new bytes(5), AMOUNT, uint64(block.timestamp + 1), builder, 0);
     }
 
     /// Hole: nOut 0 means an empty table that every circuit of the right input count would "pass".
     function test_create_rejectsZeroOutputs() public {
         vm.prank(buyer);
         vm.expectRevert(LatheOrders.TooManyOutputs.selector);
-        lathe.createOrder(2, 0, "", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 0, "", AMOUNT, uint64(block.timestamp + 1), builder, 0);
     }
 
     function test_create_rejectsWrongTableLength() public {
         vm.startPrank(buyer);
         vm.expectRevert(LatheOrders.WrongTableLength.selector);
-        lathe.createOrder(2, 1, hex"0600", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 1, hex"0600", AMOUNT, uint64(block.timestamp + 1), builder, 0);
         vm.expectRevert(LatheOrders.WrongTableLength.selector);
-        lathe.createOrder(6, 1, new bytes(7), AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(6, 1, new bytes(7), AMOUNT, uint64(block.timestamp + 1), builder, 0);
         vm.stopPrank();
     }
 
@@ -69,33 +77,33 @@ contract LatheOrdersCreateTest is LatheBase {
         vm.startPrank(buyer);
         // XOR uses 4 bits; 0xf6 sets the 4 unused high bits
         vm.expectRevert(LatheOrders.TablePaddingNotZero.selector);
-        lathe.createOrder(2, 1, hex"f6", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 1, hex"f6", AMOUNT, uint64(block.timestamp + 1), builder, 0);
         // only the top bit set is still padding
         vm.expectRevert(LatheOrders.TablePaddingNotZero.selector);
-        lathe.createOrder(2, 1, hex"86", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 1, hex"86", AMOUNT, uint64(block.timestamp + 1), builder, 0);
         // 2 inputs x 3 outputs = 12 bits: 0xd5 0x01 ok, 0xd5 0x11 has a padding bit
         vm.expectRevert(LatheOrders.TablePaddingNotZero.selector);
-        lathe.createOrder(2, 3, hex"d511", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
-        lathe.createOrder(2, 1, hex"06", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
-        lathe.createOrder(2, 3, hex"d501", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 3, hex"d511", AMOUNT, uint64(block.timestamp + 1), builder, 0);
+        lathe.createOrder(2, 1, hex"06", AMOUNT, uint64(block.timestamp + 1), builder, 0);
+        lathe.createOrder(2, 3, hex"d501", AMOUNT, uint64(block.timestamp + 1), builder, 0);
         // a whole number of bytes has no padding: every bit value is allowed
-        lathe.createOrder(6, 1, hex"ffffffffffffffff", AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(6, 1, hex"ffffffffffffffff", AMOUNT, uint64(block.timestamp + 1), builder, 0);
         vm.stopPrank();
     }
 
     function test_create_rejectsPastDeadline() public {
         vm.startPrank(buyer);
         vm.expectRevert(LatheOrders.DeadlinePassed.selector);
-        lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp), address(0), 0);
+        lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp), builder, 0);
         vm.expectRevert(LatheOrders.DeadlinePassed.selector);
-        lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp - 1), address(0), 0);
+        lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp - 1), builder, 0);
         vm.stopPrank();
     }
 
     function test_create_rejectsZeroAmount() public {
         vm.prank(buyer);
         vm.expectRevert(LatheOrders.ZeroAmount.selector);
-        lathe.createOrder(2, 1, xorTable(), 0, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 1, xorTable(), 0, uint64(block.timestamp + 1), builder, 0);
     }
 
     function test_constructor_rejectsFeeAbove500() public {
@@ -123,7 +131,7 @@ contract LatheOrdersCreateTest is LatheBase {
         usdt.setTransferFeeBps(10);
         vm.prank(buyer);
         vm.expectRevert(LatheOrders.ReceivedLessThanAmount.selector);
-        lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1), address(0), 0);
+        lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1), builder, 0);
     }
 
     function test_expected_xorTable() public {

@@ -17,8 +17,8 @@ TapeOut already lets a contract run any circuit with `eval`. So a contract can c
 ## How an order works
 
 1. **The buyer writes the rule as a full table.** Up to 6 yes/no inputs, so 64 cases, each with its expected output. Small enough to test every case, not a sample.
-2. **The buyer locks USDT** in the order contract, with a delivery deadline.
-3. **A builder delivers.** They mint the circuit on TapeOut and submit its ID.
+2. **The buyer locks USDT** in the order contract, with a delivery deadline, and names the one builder who may deliver.
+3. **The named builder delivers.** They mint the circuit on TapeOut and submit its ID.
 4. **The contract runs all 64 cases** through `eval`, in batches if one transaction can't hold them all.
 5. **Every output matches: the builder gets paid.** One miss: no payment. If nothing passes by the deadline, the buyer takes the money back.
 
@@ -42,6 +42,7 @@ Not yet tested: a contract calling a circuit chosen at claim time inside one tra
 - 6 inputs is the cap for this version. Rules with more inputs, or with numbers that must first become yes/no, come after Dec 7.
 - Who can change the circuit runner: the processor factory is owned by a 3-of-5 multisig and is not sealed; the circuit beacon's owner is the zero address (read-only check, Nov 15 2026). We have not audited every upgrade path, so Lathe pins and inspects the exact processor before any order takes money.
 - Lathe takes a fee on each paid order. Rate not set.
+- Every order names its builder. Open orders, where any builder may deliver, come after Dec 7: an open order lets anyone mint a copy of the honest builder's circuit, or wrap it, and deliver first.
 
 ## Roadmap to Dec 7
 

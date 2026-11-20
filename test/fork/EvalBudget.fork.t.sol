@@ -112,7 +112,7 @@ contract EvalBudgetForkTest is Test {
 
     function _identOrder() internal returns (uint256 id) {
         vm.prank(buyer);
-        id = lathe.createOrder(6, 16, _identTable(), AMOUNT, uint64(block.timestamp + 1 days), address(0), 0);
+        id = lathe.createOrder(6, 16, _identTable(), AMOUNT, uint64(block.timestamp + 1 days), honest, 0);
         vm.prank(honest);
         lathe.deliver(id, MUL_PROC, identId);
     }
@@ -170,7 +170,7 @@ contract EvalBudgetForkTest is Test {
             if ((c >> 1) & 1 == 1) table[c / 8] = bytes1(uint8(table[c / 8]) | uint8(1 << (c % 8)));
         }
         vm.prank(buyer);
-        uint256 id = lathe.createOrder(6, 1, table, AMOUNT, uint64(block.timestamp + 1 days), address(0), 32);
+        uint256 id = lathe.createOrder(6, 1, table, AMOUNT, uint64(block.timestamp + 1 days), honest, 32);
         vm.prank(honest);
         lathe.deliver(id, XOR_PROC, bombId);
 

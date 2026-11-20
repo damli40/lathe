@@ -76,7 +76,7 @@ What it does and what you should see:
 
 | Step | What happens | Expect |
 |---|---|---|
-| (a) | Creates an order for 2-input XOR (1 mUSDT), delivers the honest circuit | `order id 1 status 2` (2 = Paid). Small circuits are checked inside `deliver`, so it pays in the same transaction |
+| (a) | Creates an order for 2-input XOR (1 mUSDT) naming you as the builder, delivers the honest circuit | `order id 1 status 2` (2 = Paid). Small circuits are checked inside `deliver`, so it pays in the same transaction |
 | (b) | Creates a second order, then tries the wrong circuit | `deliver reverts WrongAnswer(3)`, `order id 2 status 0` (0 = Open). Case 3 is 1 XOR 1, where the wrong circuit says 1 |
 | (c) | Creates a third order with a 5-minute deadline | `order id 3 status 0`, plus the exact `cast send ... refund` command |
 
@@ -87,6 +87,8 @@ For (c): wait until the printed deadline passes (5 minutes; set `REFUND_DELAY=<s
 Order 2's 1 mUSDT can also be refunded with the same command and id 2, but only after its one-day deadline.
 
 **Where to paste the results:** create `evidence/2026-11-2x-testnet-v0.md` (use the real date) with the six addresses from step 3 and every transaction hash. The hashes are in `broadcast/DeployTestnet.s.sol/1952/run-latest.json` and `broadcast/Smoke.s.sol/1952/run-latest.json` (field `hash`), plus the `cast send` outputs for the refund and the optional failed delivery. The `broadcast/` folder is git-ignored, so copy the hashes into the evidence file. Add a line to `evidence/README.md`. Say in the file that testnet ran on mocks.
+
+Every order must name its builder (`createOrder` reverts `BuilderRequired` for the zero address). The smoke run names the broadcasting account, which also owns both mock circuits.
 
 All three steps must behave as described before mainnet.
 

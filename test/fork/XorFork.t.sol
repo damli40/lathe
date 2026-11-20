@@ -32,7 +32,7 @@ contract XorForkTest is Test {
 
     function create(bytes memory table) internal returns (uint256 id) {
         vm.prank(buyer);
-        id = lathe.createOrder(2, 1, table, AMOUNT, uint64(block.timestamp + 1 days), address(0), 0);
+        id = lathe.createOrder(2, 1, table, AMOUNT, uint64(block.timestamp + 1 days), circuitOwner, 0);
     }
 
     function deliver(uint256 id) internal {

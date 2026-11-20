@@ -7,7 +7,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Testnet smoke run (chain 1952) against the contracts DeployTestnet made.
 /// Env: LATHE, USDT, PROCESSOR, XOR_ID, WRONG_ID; optional REFUND_DELAY (seconds, default 300).
-/// The broadcaster must be the deployer (it owns both mock circuits and holds the mUSDT).
+/// The broadcaster must be the deployer (it owns both mock circuits and holds the mUSDT). Every order names the
+/// broadcaster as its builder: the contract refuses an order without one (BuilderRequired).
 ///   (a) 2-input XOR order + deliver the honest circuit. deliver checks small circuits inline, so it pays at once.
 ///   (b) same order + deliver the wrong circuit. That reverts WrongAnswer(3), and forge does not broadcast a
 ///       call that reverts, so the order is created on chain and the wrong delivery is SIMULATED here and its
@@ -36,17 +37,17 @@ contract Smoke is Script {
         usdt.approve(address(lathe), 3 * uint256(AMOUNT));
 
         // (a) honest XOR -> Paid
-        uint256 a = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, deadline, address(0), 0);
+        uint256 a = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, deadline, me, 0);
         // Explicit gas: forge sizes a tx from the gas it saw used (x1.3), but deliver must also HOLD each case's
         // eval budget (100,000 + 15,000 per gate, x64/63, + 20,000) before calling eval, and eval uses far less.
         // Without this the sent tx reverts InsufficientGasForCase (seen on the local anvil run).
         lathe.deliver{gas: DELIVER_GAS}(a, processor, xorId);
 
         // (b) order for the wrong delivery
-        uint256 b = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, deadline, address(0), 0);
+        uint256 b = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, deadline, me, 0);
 
         // (c) short-deadline order for the refund case
-        uint256 c = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, shortDeadline, address(0), 0);
+        uint256 c = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, shortDeadline, me, 0);
         vm.stopBroadcast();
 
         _logStatus("(a) honest XOR, expect Paid(2)", lathe, a);

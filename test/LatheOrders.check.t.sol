@@ -26,10 +26,13 @@ contract LatheOrdersCheckTest is LatheBase {
 
     // ---- deliver ----
 
-    /// Review Focus 1: someone else submits the honest builder's passing circuit to take the pay.
+    /// Review Focus 1: someone else submits the honest builder's passing circuit to take the pay. A stranger is
+    /// now stopped by NotBuilder first (see test_deliver_namedBuilderOnly); the owner check still stops the named
+    /// builder from submitting a circuit someone else minted.
     function test_deliver_requiresOwner() public {
         uint256 id = createXor();
-        vm.prank(stranger);
+        proc.setOwner(XOR_ID, stranger);
+        vm.prank(builder);
         vm.expectRevert(LatheOrders.NotCircuitOwner.selector);
         lathe.deliver(id, address(proc), XOR_ID);
     }
@@ -69,7 +72,7 @@ contract LatheOrdersCheckTest is LatheBase {
     function test_deliver_rejectsOverMaxGates() public {
         vm.prank(buyer);
         uint256 id = lathe.createOrder(
-            2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1 days), address(0), BATCHED_GATES - 1
+            2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1 days), builder, BATCHED_GATES - 1
         );
         vm.prank(builder);
         vm.expectRevert(LatheOrders.TooManyGates.selector);
@@ -97,6 +100,23 @@ contract LatheOrdersCheckTest is LatheBase {
         vm.expectRevert(LatheOrders.NotBuilder.selector);
         lathe.deliver(id, address(proc), 5);
         deliverXor(id);
+    }
+
+    /// The theft named orders stop: a copier mints a circuit with the honest builder's exact netlist (same gates,
+    /// same answers) and owns it, so the owner check passes. Only the named-builder check refuses it.
+    function test_deliver_copiedCircuitByOtherAddress_reverts() public {
+        uint256 id = createXor(); // names `builder`
+        uint256 copyId = 77;
+        setCircuitFromTable(copyId, stranger, 2, 1, xorTable(), BATCHED_GATES);
+        proc.setNetlist(copyId, proc.netlist(XOR_ID));
+        assertEq(keccak256(proc.netlist(copyId)), keccak256(proc.netlist(XOR_ID)), "identical netlist");
+        vm.prank(stranger);
+        vm.expectRevert(LatheOrders.NotBuilder.selector);
+        lathe.deliver(id, address(proc), copyId);
+        // the honest builder still delivers
+        deliverXor(id);
+        (,,,,,,,, LatheOrders.Status s) = lathe.orders(id);
+        assertEq(uint8(s), uint8(LatheOrders.Status.Checking));
     }
 
     /// Hole: an order id that was never created reads as status Open (enum default). It must not accept a delivery.
@@ -332,6 +352,16 @@ contract LatheOrdersCheckTest is LatheBase {
         assertEq(next, 0);
     }
 
+    /// Budget math has headroom: the largest uint32 gate count does not overflow and is above the per-case cap;
+    /// 6,660 gates is exactly the cap (allowed), 6,661 is over it (deliver refuses). From review 2.
+    function test_evalBudget_noOverflow_capBoundary() public view {
+        uint256 b = lathe.evalBudget(type(uint32).max);
+        assertGt(b, lathe.MAX_CASE_GAS());
+        assertLt(b * 64, type(uint256).max / 1e30);
+        assertEq(lathe.evalBudget(6660), lathe.MAX_CASE_GAS());
+        assertGt(lathe.evalBudget(6661), lathe.MAX_CASE_GAS());
+    }
+
     /// eval gets exactly its budget: a circuit costing a bit under it passes, a bit over it fails, and sending
     /// far more gas does not change the outcome.
     function test_check_budgetIsTheLimit_notCallerGas() public {
@@ -395,14 +425,14 @@ contract LatheOrdersCheckTest is LatheBase {
     /// Fee rounds down (in the builder's favour); a zero fee adds nothing to feesOwed.
     function test_check_feeRoundsDown() public {
         vm.prank(buyer);
-        uint256 id = lathe.createOrder(2, 1, xorTable(), 199, uint64(block.timestamp + 1 days), address(0), 0);
+        uint256 id = lathe.createOrder(2, 1, xorTable(), 199, uint64(block.timestamp + 1 days), builder, 0);
         deliverXor(id);
         lathe.check(id, 4);
         assertEq(lathe.feesOwed(), 1); // 199 * 100 / 10000 = 1.99 -> 1
         assertEq(usdt.balanceOf(builder), 198);
 
         vm.prank(buyer);
-        id = lathe.createOrder(2, 1, xorTable(), 99, uint64(block.timestamp + 1 days), address(0), 0);
+        id = lathe.createOrder(2, 1, xorTable(), 99, uint64(block.timestamp + 1 days), builder, 0);
         deliverXor(id);
         lathe.check(id, 4);
         assertEq(lathe.feesOwed(), 1); // fee 0 this time
@@ -425,7 +455,7 @@ contract LatheOrdersCheckTest is LatheBase {
     function test_check_wideOutputs() public {
         // 2 inputs, 3 outputs: answers 5,2,7,0 -> bits 101 010 111 000 -> 0x1D5 -> d5 01
         vm.prank(buyer);
-        uint256 id = lathe.createOrder(2, 3, hex"d501", AMOUNT, uint64(block.timestamp + 1 days), address(0), 0);
+        uint256 id = lathe.createOrder(2, 3, hex"d501", AMOUNT, uint64(block.timestamp + 1 days), builder, 0);
         setCircuitFromTable(11, builder, 2, 3, hex"d501", BATCHED_GATES);
         vm.prank(builder);
         lathe.deliver(id, address(proc), 11);

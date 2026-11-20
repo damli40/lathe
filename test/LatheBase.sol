@@ -44,7 +44,7 @@ abstract contract LatheBase is Test {
 
     function createXor() internal returns (uint256) {
         vm.prank(buyer);
-        return lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1 days), address(0), 0);
+        return lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1 days), builder, 0);
     }
 
     /// A 6-input, 1-output table: answer = parity of the case number (64 cases, 8 bytes).
@@ -61,7 +61,7 @@ abstract contract LatheBase is Test {
 
     function createParity() internal returns (uint256) {
         vm.prank(buyer);
-        return lathe.createOrder(6, 1, parityTable(), AMOUNT, uint64(block.timestamp + 1 days), address(0), 0);
+        return lathe.createOrder(6, 1, parityTable(), AMOUNT, uint64(block.timestamp + 1 days), builder, 0);
     }
 
     /// Register circuit `id` on the mock processor, owned by `who`, answering `table` exactly.

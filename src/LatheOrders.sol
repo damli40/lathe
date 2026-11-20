@@ -24,7 +24,7 @@ contract LatheOrders is ReentrancyGuard {
 
     struct Order {
         address buyer;
-        address builder; // zero = anyone may deliver
+        address builder; // the only address that may deliver; never zero (see _create)
         uint96 amount;
         uint64 deadline;
         uint32 maxGates; // zero = no cap
@@ -86,6 +86,7 @@ contract LatheOrders is ReentrancyGuard {
 
     error FeeTooHigh();
     error ZeroAddress();
+    error BuilderRequired();
     error TooManyCases();
     error TooManyOutputs();
     error WrongTableLength();
@@ -119,6 +120,8 @@ contract LatheOrders is ReentrancyGuard {
     }
 
     /// @notice Lock `amount` for a circuit with `nIn` inputs and `nOut` outputs that matches `table`.
+    /// `builder` must be named: only that address may deliver. Open orders (anyone delivers) are not offered,
+    /// because anyone could mint a copy of, or wrap, the honest builder's circuit and deliver it first.
     function createOrder(
         uint8 nIn,
         uint8 nOut,
@@ -152,6 +155,7 @@ contract LatheOrders is ReentrancyGuard {
         }
         if (deadline <= block.timestamp) revert DeadlinePassed();
         if (amount == 0) revert ZeroAmount();
+        if (builder == address(0)) revert BuilderRequired();
 
         orderId = nextOrderId++;
         orders[orderId] = Order({
@@ -174,7 +178,8 @@ contract LatheOrders is ReentrancyGuard {
         if (usdt.balanceOf(address(this)) - before != amount) revert ReceivedLessThanAmount();
     }
 
-    /// @notice Offer circuit `circuitId` on `processor` for order `orderId`. The caller must own the circuit.
+    /// @notice Offer circuit `circuitId` on `processor` for order `orderId`. The caller must be the order's named
+    /// builder and must own the circuit.
     function deliver(uint256 orderId, address processor, uint256 circuitId) external nonReentrant {
         Order storage o = orders[orderId];
         if (o.buyer == address(0)) revert NoSuchOrder();
