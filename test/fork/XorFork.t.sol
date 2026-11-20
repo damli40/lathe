@@ -73,11 +73,11 @@ contract XorForkTest is Test {
         uint256 c = create(hex"06");
 
         lathe.check(a, 1);
-        uint256 one = vm.lastCallGas().gasTotalUsed;
+        uint256 one = vm.lastFrameGas().gasTotalUsed;
         lathe.check(b, 3);
-        uint256 three = vm.lastCallGas().gasTotalUsed;
+        uint256 three = vm.lastFrameGas().gasTotalUsed;
         lathe.check(c, 4);
-        uint256 fullPaid = vm.lastCallGas().gasTotalUsed;
+        uint256 fullPaid = vm.lastFrameGas().gasTotalUsed;
 
         console.log("check(1 case)            gas:", one);
         console.log("check(3 cases)           gas:", three);

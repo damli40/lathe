@@ -18,10 +18,7 @@ interface IProcessor {
         view
         returns (bytes memory newState, bytes memory outputs);
 
-    function circuitInfo(uint256 id)
-        external
-        view
-        returns (uint32 nIn, uint32 nOut, uint32 nState, uint32 gateCount);
+    function circuitInfo(uint256 id) external view returns (uint32 nIn, uint32 nOut, uint32 nState, uint32 gateCount);
 
     function netlist(uint256 id) external view returns (bytes memory);
 

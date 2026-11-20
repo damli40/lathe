@@ -62,6 +62,7 @@ contract LatheOrders is ReentrancyGuard {
     event Delivered(uint256 indexed orderId, address indexed builder, address processor, uint256 circuitId);
     event Rejected(uint256 indexed orderId, uint256 caseIndex);
     event Paid(uint256 indexed orderId, address indexed builder, address processor, uint256 circuitId);
+    event Refunded(uint256 indexed orderId, address indexed buyer, uint96 amount);
 
     error FeeTooHigh();
     error ZeroAddress();
@@ -81,6 +82,9 @@ contract LatheOrders is ReentrancyGuard {
     error TooManyGates();
     error CircuitChanged();
     error EvalOutOfGas();
+    error GraceOver();
+    error NotBuyer();
+    error RefundNotAllowed();
 
     constructor(address factory_, address usdt_, address feeRecipient_, uint16 feeBps_) {
         if (feeBps_ > MAX_FEE_BPS) revert FeeTooHigh();
@@ -178,6 +182,8 @@ contract LatheOrders is ReentrancyGuard {
     function check(uint256 orderId, uint256 maxCases) external nonReentrant returns (bool done, bool passed) {
         Order storage o = orders[orderId];
         if (o.status != Status.Checking) revert NotChecking();
+        // A check under way at the deadline may finish during the grace period, not after it.
+        if (block.timestamp > uint256(o.deadline) + GRACE) revert GraceOver();
         Delivery storage d = deliveries[orderId];
         _requireUnchanged(o, d);
 
@@ -201,6 +207,21 @@ contract LatheOrders is ReentrancyGuard {
         return (true, true);
     }
 
+    /// @notice The buyer takes the money back: after the deadline when no delivery is being checked, or after
+    /// deadline + GRACE when one still is.
+    function refund(uint256 orderId) external nonReentrant {
+        Order storage o = orders[orderId];
+        if (msg.sender != o.buyer) revert NotBuyer();
+        uint256 t = block.timestamp;
+        bool allowed = (o.status == Status.Open && t > o.deadline)
+            || (o.status == Status.Checking && t > uint256(o.deadline) + GRACE);
+        if (!allowed) revert RefundNotAllowed();
+        o.status = Status.Refunded;
+        delete deliveries[orderId];
+        emit Refunded(orderId, msg.sender, o.amount);
+        usdt.safeTransfer(msg.sender, o.amount);
+    }
+
     /// @dev The processor is upgradeable; refuse to judge a circuit that is no longer the one delivered.
     function _requireUnchanged(Order storage o, Delivery storage d) internal view {
         IProcessor p = IProcessor(d.processor);
@@ -221,14 +242,11 @@ contract LatheOrders is ReentrancyGuard {
 
     /// @dev One case. A revert inside eval counts as a wrong answer, except when eval ran out of gas: then the
     /// whole call reverts, so a caller who sends too little gas cannot get an honest delivery rejected.
-    function _caseMatches(
-        IProcessor p,
-        uint256 id,
-        uint256 c,
-        uint256 nIn,
-        uint256 nOut,
-        bytes memory table
-    ) internal view returns (bool) {
+    function _caseMatches(IProcessor p, uint256 id, uint256 c, uint256 nIn, uint256 nOut, bytes memory table)
+        internal
+        view
+        returns (bool)
+    {
         bytes memory inputs = BitLib.pack(c, nIn);
         uint256 gasBefore = gasleft();
         try p.eval(id, inputs) returns (bytes memory out) {
