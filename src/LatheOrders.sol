@@ -48,6 +48,18 @@ contract LatheOrders is ReentrancyGuard {
     uint256 public constant MAX_CASE_BITS = 6; // nIn + nState <= 6, so at most 64 cases
     uint256 public constant MAX_ANSWER_BITS = 16; // nOut + nState <= 16
 
+    /// @notice Each case's eval gets exactly evalBudget(gateCount) gas, never the caller's leftover gas, so a
+    /// case's result cannot depend on how much gas the caller sent. Running out of the budget is a wrong answer.
+    /// Measured on X Layer (evidence/2026-11-20-eval-gas-budget.md): ~2,320 gas per real gate, ~10,000 per gate
+    /// for circuits built from REFs to the 4-gate XOR. The per-gate figure covers the REF-heavy case with 1.5x.
+    uint256 public constant EVAL_BASE_GAS = 100_000;
+    uint256 public constant EVAL_GAS_PER_GATE = 15_000;
+    /// @notice Gas kept back for the work between the gas check and the call, so eval really gets its budget.
+    uint256 public constant GAS_RESERVE = 20_000;
+    /// @notice Largest budget for one case. A circuit above it could never be checked in one X Layer
+    /// transaction (block gas limit 210M) and would hold the order until deadline + grace, so deliver refuses it.
+    uint256 public constant MAX_CASE_GAS = 100_000_000;
+
     address public immutable factory;
     IERC20 public immutable usdt;
     address public immutable feeRecipient;
@@ -81,7 +93,8 @@ contract LatheOrders is ReentrancyGuard {
     error ShapeMismatch();
     error TooManyGates();
     error CircuitChanged();
-    error EvalOutOfGas();
+    error InsufficientGasForCase();
+    error CircuitTooBigToCheck();
     error GraceOver();
     error NotBuyer();
     error RefundNotAllowed();
@@ -163,6 +176,7 @@ contract LatheOrders is ReentrancyGuard {
         (uint32 nIn, uint32 nOut, uint32 nState, uint32 gates) = IProcessor(processor).circuitInfo(circuitId);
         if (nIn != o.nIn || nOut != o.nOut || nState != o.nState) revert ShapeMismatch();
         if (o.maxGates != 0 && gates > o.maxGates) revert TooManyGates();
+        if (evalBudget(gates) > MAX_CASE_GAS) revert CircuitTooBigToCheck();
 
         deliveries[orderId] = Delivery({
             processor: processor,
@@ -187,13 +201,17 @@ contract LatheOrders is ReentrancyGuard {
         Delivery storage d = deliveries[orderId];
         _requireUnchanged(o, d);
 
+        // V0 orders have no memory bits: cases = 2^nIn and answers are nOut bits. V1 (memory) needs step() and
+        // 2^(nIn+nState) cases with nOut+nState-bit answers; this loop must not be reused for it as is.
+        assert(o.nState == 0);
         uint256 total = uint256(1) << o.nIn;
         uint256 c = d.nextCase;
         uint256 end = maxCases >= total - c ? total : c + maxCases;
         bytes memory table = tableOf[orderId];
+        uint256 budget = evalBudget(d.gateCount);
 
         for (; c < end; ++c) {
-            if (!_caseMatches(IProcessor(d.processor), d.circuitId, c, o.nIn, o.nOut, table)) {
+            if (!_caseMatches(IProcessor(d.processor), d.circuitId, c, o.nIn, o.nOut, table, budget)) {
                 delete deliveries[orderId];
                 o.status = Status.Open;
                 emit Rejected(orderId, c);
@@ -240,21 +258,30 @@ contract LatheOrders is ReentrancyGuard {
         if (fee > 0) usdt.safeTransfer(feeRecipient, fee);
     }
 
-    /// @dev One case. A revert inside eval counts as a wrong answer, except when eval ran out of gas: then the
-    /// whole call reverts, so a caller who sends too little gas cannot get an honest delivery rejected.
-    function _caseMatches(IProcessor p, uint256 id, uint256 c, uint256 nIn, uint256 nOut, bytes memory table)
-        internal
-        view
-        returns (bool)
-    {
+    /// @notice The gas each case's eval gets for a circuit of `gateCount` gates (REF'd gates included).
+    function evalBudget(uint256 gateCount) public pure returns (uint256) {
+        return EVAL_BASE_GAS + EVAL_GAS_PER_GATE * gateCount;
+    }
+
+    /// @dev One case. eval gets exactly `budget` gas. If the caller cannot give it that much, the whole call
+    /// reverts and nothing is recorded. A revert inside eval (including running out of the budget) or a short
+    /// output is a wrong answer: it is the circuit's own fault and the same for every caller.
+    function _caseMatches(
+        IProcessor p,
+        uint256 id,
+        uint256 c,
+        uint256 nIn,
+        uint256 nOut,
+        bytes memory table,
+        uint256 budget
+    ) internal view returns (bool) {
         bytes memory inputs = BitLib.pack(c, nIn);
-        uint256 gasBefore = gasleft();
-        try p.eval(id, inputs) returns (bytes memory out) {
+        // A call can pass on at most 63/64 of the gas left (EIP-150); keep enough so eval gets all of `budget`.
+        if (gasleft() < budget * 64 / 63 + GAS_RESERVE) revert InsufficientGasForCase();
+        try p.eval{gas: budget}(id, inputs) returns (bytes memory out) {
             if (out.length < (nOut + 7) / 8) return false;
             return BitLib.lowBits(out, nOut) == TableLib.expected(table, c, nOut);
         } catch {
-            // After a call runs out of gas, at most 1/64 of the gas before it is left (EIP-150).
-            if (gasleft() <= gasBefore / 63) revert EvalOutOfGas();
             return false;
         }
     }

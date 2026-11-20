@@ -259,15 +259,76 @@ contract LatheOrdersCheckTest is LatheBase {
         assertEq(uint8(status(id)), uint8(LatheOrders.Status.Open));
     }
 
-    /// Hole: anyone can call check. If running out of gas inside eval counted as a wrong answer, a griefer
-    /// could pass too little gas and reject an honest builder. Out of gas must revert, not reject.
-    function test_check_evalOutOfGas_revertsNotRejects() public {
+    // ---- per-case gas budget (FIX 1) ----
+
+    function test_evalBudget_formula() public view {
+        assertEq(lathe.evalBudget(0), lathe.EVAL_BASE_GAS());
+        assertEq(lathe.evalBudget(652), lathe.EVAL_BASE_GAS() + 652 * lathe.EVAL_GAS_PER_GATE());
+    }
+
+    /// A circuit that burns all gas it is given (a gas bomb) is rejected, the same way whatever gas the caller
+    /// sends, because each case gets exactly its budget. (Before FIX 1 this reverted with EvalOutOfGas; the
+    /// rule changed on purpose: the budget is fixed, so running out of it is the circuit's own fault.)
+    function test_check_gasBomb_rejectedWhateverGasIsSent() public {
         uint256 id = createXor();
         deliverXor(id);
         proc.setBurnGasEval(XOR_ID, true);
-        vm.expectRevert(LatheOrders.EvalOutOfGas.selector);
-        lathe.check{gas: 2_000_000}(id, 4);
+        uint256 need = lathe.evalBudget(4) * 64 / 63 + lathe.GAS_RESERVE() + 200_000;
+        uint256[3] memory gases = [need, 5 * need, 50 * need];
+        uint256 snap = vm.snapshotState();
+        for (uint256 i = 0; i < 3; ++i) {
+            vm.revertToState(snap);
+            vm.expectEmit(true, false, false, true);
+            emit LatheOrders.Rejected(id, 0);
+            (bool done, bool passed) = lathe.check{gas: gases[i]}(id, 4);
+            assertTrue(done);
+            assertFalse(passed);
+            assertEq(uint8(status(id)), uint8(LatheOrders.Status.Open));
+        }
+    }
+
+    /// Too little gas for one case's budget reverts the whole call: nothing is recorded.
+    function test_check_tooLittleGasForBudget_reverts() public {
+        uint256 id = createParity();
+        vm.prank(builder);
+        lathe.deliver(id, address(proc), PAR_ID);
+        uint256 budget = lathe.evalBudget(20);
+        vm.expectRevert(LatheOrders.InsufficientGasForCase.selector);
+        lathe.check{gas: budget}(id, 64); // the budget alone, without the 64/63 headroom
         assertEq(uint8(status(id)), uint8(LatheOrders.Status.Checking));
+        (,,,,, uint32 next) = lathe.deliveries(id);
+        assertEq(next, 0);
+    }
+
+    /// eval gets exactly its budget: a circuit costing a bit under it passes, a bit over it fails, and sending
+    /// far more gas does not change the outcome.
+    function test_check_budgetIsTheLimit_notCallerGas() public {
+        uint256 budget = lathe.evalBudget(4);
+        uint256 id = createXor();
+        deliverXor(id);
+        proc.setEvalGasCost(XOR_ID, budget * 9 / 10);
+        (, bool passed) = lathe.check{gas: 50 * budget}(id, 4);
+        assertTrue(passed, "under budget passes");
+
+        id = createXor();
+        deliverXor(id);
+        proc.setEvalGasCost(XOR_ID, budget * 11 / 10);
+        (bool done, bool passed2) = lathe.check{gas: 50 * budget}(id, 4);
+        assertTrue(done);
+        assertFalse(passed2, "over budget is a wrong answer even with plenty of gas");
+    }
+
+    /// A circuit whose one-case budget could not fit in a transaction could never be checked, and would hold
+    /// the order until deadline + grace. deliver refuses it.
+    function test_deliver_rejectsCircuitTooBigToCheck() public {
+        uint256 maxGates = (lathe.MAX_CASE_GAS() - lathe.EVAL_BASE_GAS()) / lathe.EVAL_GAS_PER_GATE();
+        uint256 id = createXor();
+        proc.setGateCount(XOR_ID, uint32(maxGates + 1));
+        vm.prank(builder);
+        vm.expectRevert(LatheOrders.CircuitTooBigToCheck.selector);
+        lathe.deliver(id, address(proc), XOR_ID);
+        proc.setGateCount(XOR_ID, uint32(maxGates));
+        deliverXor(id);
     }
 
     /// The same honest circuit, called with too little gas by a griefer, stays in Checking and later pays.

@@ -26,6 +26,7 @@ contract MockProcessor {
     mapping(uint256 => bytes[]) internal outs;
     mapping(uint256 => bool) public revertEval;
     mapping(uint256 => bool) public burnGasEval;
+    mapping(uint256 => uint256) public evalGasCost; // extra gas eval burns before answering (0 = none)
 
     function setCircuit(uint256 id, address who, uint32 nIn, uint32 nOut, uint32 nState, uint32 gates) external {
         owner[id] = who;
@@ -64,6 +65,11 @@ contract MockProcessor {
         burnGasEval[id] = on;
     }
 
+    /// Make eval burn about `cost` gas before answering, like a circuit that costs that much to run.
+    function setEvalGasCost(uint256 id, uint256 cost) external {
+        evalGasCost[id] = cost;
+    }
+
     function ownerOf(uint256 id) external view returns (address) {
         address o = owner[id];
         require(o != address(0), "ERC721NonexistentToken");
@@ -87,6 +93,12 @@ contract MockProcessor {
             while (true) {
                 x++;
             }
+        }
+        uint256 cost = evalGasCost[id];
+        if (cost > 0) {
+            // If cost is more than the gas left, this spins until out of gas.
+            uint256 stopAt = gasleft() > cost ? gasleft() - cost : 0;
+            while (gasleft() > stopAt) {}
         }
         require(info[id].nState == 0, "has latch: use step");
         uint256 c;
