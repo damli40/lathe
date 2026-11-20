@@ -47,6 +47,8 @@ contract XorForkTest is Test {
         (bool done, bool passed) = lathe.check(id, 4);
         assertTrue(done && passed);
         assertEq(IERC20Like(USDT0).balanceOf(circuitOwner) - before, uint256(AMOUNT) * 9_900 / 10_000);
+        assertEq(lathe.feesOwed(), uint256(AMOUNT) / 100);
+        lathe.claimFees(); // FIX 2: the fee is pulled, not pushed
         assertEq(IERC20Like(USDT0).balanceOf(feeTo), uint256(AMOUNT) / 100);
     }
 

@@ -19,6 +19,11 @@ contract MockUSDT is ERC20 {
         _mint(to, amount);
     }
 
+    /// Same name as the real USD₮0 getter.
+    function isBlocked(address who) external view returns (bool) {
+        return blacklisted[who];
+    }
+
     function setBlacklisted(address who, bool on) external {
         blacklisted[who] = on;
     }

@@ -66,6 +66,9 @@ contract LatheOrders is ReentrancyGuard {
     uint16 public immutable feeBps;
 
     uint256 public nextOrderId = 1;
+    /// @notice Fees earned but not yet sent. Pulled with claimFees, so a fee recipient the token blocks can
+    /// never stop a builder's payout.
+    uint256 public feesOwed;
     mapping(uint256 => Order) public orders;
     mapping(uint256 => bytes) public tableOf;
     mapping(uint256 => Delivery) public deliveries;
@@ -75,6 +78,7 @@ contract LatheOrders is ReentrancyGuard {
     event Rejected(uint256 indexed orderId, uint256 caseIndex);
     event Paid(uint256 indexed orderId, address indexed builder, address processor, uint256 circuitId);
     event Refunded(uint256 indexed orderId, address indexed buyer, uint96 amount);
+    event FeesClaimed(address indexed to, uint256 amount);
 
     error FeeTooHigh();
     error ZeroAddress();
@@ -240,6 +244,14 @@ contract LatheOrders is ReentrancyGuard {
         usdt.safeTransfer(msg.sender, o.amount);
     }
 
+    /// @notice Send all owed fees to the fixed fee recipient. Anyone may call.
+    function claimFees() external nonReentrant {
+        uint256 amount = feesOwed;
+        feesOwed = 0;
+        emit FeesClaimed(feeRecipient, amount);
+        if (amount > 0) usdt.safeTransfer(feeRecipient, amount);
+    }
+
     /// @dev The processor is upgradeable; refuse to judge a circuit that is no longer the one delivered.
     function _requireUnchanged(Order storage o, Delivery storage d) internal view {
         IProcessor p = IProcessor(d.processor);
@@ -248,14 +260,15 @@ contract LatheOrders is ReentrancyGuard {
         if (keccak256(p.netlist(d.circuitId)) != d.netlistHash) revert CircuitChanged();
     }
 
-    /// @dev Status first, then the transfers (checks-effects-interactions). Fee rounds down.
+    /// @dev Status and fee bookkeeping first, then the one transfer to the builder (checks-effects-interactions).
+    /// Fee rounds down. The fee is only recorded here; claimFees sends it.
     function _pay(uint256 orderId, Order storage o, Delivery storage d) internal {
         o.status = Status.Paid;
         address payee = d.builder;
         uint256 fee = uint256(o.amount) * feeBps / 10_000;
+        feesOwed += fee;
         emit Paid(orderId, payee, d.processor, d.circuitId);
         usdt.safeTransfer(payee, o.amount - fee);
-        if (fee > 0) usdt.safeTransfer(feeRecipient, fee);
     }
 
     /// @notice The gas each case's eval gets for a circuit of `gateCount` gates (REF'd gates included).

@@ -138,8 +138,38 @@ contract LatheOrdersCheckTest is LatheBase {
         assertEq(uint8(status(id)), uint8(LatheOrders.Status.Paid));
         uint256 toBuilder = uint256(AMOUNT) * (10_000 - FEE_BPS) / 10_000;
         assertEq(usdt.balanceOf(builder), toBuilder);
+        // FIX 2: the fee is owed, not pushed; claimFees moves it.
+        assertEq(lathe.feesOwed(), AMOUNT - toBuilder);
+        assertEq(usdt.balanceOf(address(lathe)), AMOUNT - toBuilder);
+        lathe.claimFees();
         assertEq(usdt.balanceOf(feeTo), AMOUNT - toBuilder);
         assertEq(usdt.balanceOf(address(lathe)), 0);
+    }
+
+    function test_claimFees_anyoneCalls_paysFixedRecipient_once() public {
+        uint256 id = createXor();
+        deliverXor(id);
+        lathe.check(id, 4);
+        uint256 fee = uint256(AMOUNT) * FEE_BPS / 10_000;
+        vm.expectEmit(true, false, false, true);
+        emit LatheOrders.FeesClaimed(feeTo, fee);
+        vm.prank(stranger);
+        lathe.claimFees();
+        assertEq(usdt.balanceOf(feeTo), fee);
+        assertEq(usdt.balanceOf(stranger), 0);
+        // nothing left: a second claim moves nothing
+        lathe.claimFees();
+        assertEq(usdt.balanceOf(feeTo), fee);
+    }
+
+    /// Owed fees never touch money locked for an open order.
+    function test_claimFees_leavesOtherOrdersMoney() public {
+        uint256 a = createXor();
+        createXor();
+        deliverXor(a);
+        lathe.check(a, 4);
+        lathe.claimFees();
+        assertEq(usdt.balanceOf(address(lathe)), AMOUNT);
     }
 
     /// Review Focus 4: a junk delivery is rejected on the first wrong case and the order reopens in the same call.
@@ -360,20 +390,20 @@ contract LatheOrdersCheckTest is LatheBase {
         assertGt(usdt.balanceOf(builder), 0);
     }
 
-    /// Fee rounds down (in the builder's favour); a zero fee skips the fee transfer.
+    /// Fee rounds down (in the builder's favour); a zero fee adds nothing to feesOwed.
     function test_check_feeRoundsDown() public {
         vm.prank(buyer);
         uint256 id = lathe.createOrder(2, 1, xorTable(), 199, uint64(block.timestamp + 1 days), address(0), 0);
         deliverXor(id);
         lathe.check(id, 4);
-        assertEq(usdt.balanceOf(feeTo), 1); // 199 * 100 / 10000 = 1.99 -> 1
+        assertEq(lathe.feesOwed(), 1); // 199 * 100 / 10000 = 1.99 -> 1
         assertEq(usdt.balanceOf(builder), 198);
 
         vm.prank(buyer);
         id = lathe.createOrder(2, 1, xorTable(), 99, uint64(block.timestamp + 1 days), address(0), 0);
         deliverXor(id);
         lathe.check(id, 4);
-        assertEq(usdt.balanceOf(feeTo), 1); // fee 0 this time
+        assertEq(lathe.feesOwed(), 1); // fee 0 this time
         assertEq(usdt.balanceOf(builder), 198 + 99);
     }
 
@@ -383,10 +413,11 @@ contract LatheOrdersCheckTest is LatheBase {
         uint256 b = createXor();
         deliverXor(a);
         lathe.check(a, 4);
-        assertEq(usdt.balanceOf(address(lathe)), AMOUNT);
+        // FIX 2: the contract also holds the fee owed until claimFees
+        assertEq(usdt.balanceOf(address(lathe)), AMOUNT + lathe.feesOwed());
         deliverXor(b);
         lathe.check(b, 4);
-        assertEq(usdt.balanceOf(address(lathe)), 0);
+        assertEq(usdt.balanceOf(address(lathe)), lathe.feesOwed());
     }
 
     function test_check_wideOutputs() public {

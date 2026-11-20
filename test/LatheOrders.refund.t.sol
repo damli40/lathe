@@ -166,15 +166,28 @@ contract LatheOrdersRefundTest is LatheBase {
         assertEq(usdt.balanceOf(buyer), before + AMOUNT);
     }
 
-    function test_blacklistedFeeRecipient_payoutReverts_buyerRefundsAfterGrace() public {
+    /// FIX 2: a blocked fee recipient must never stop a builder's payout. The fee waits in feesOwed.
+    /// (Before FIX 2 the payout reverted and the buyer refunded after grace; changed on purpose.)
+    function test_blockedFeeRecipient_builderStillPaid() public {
         uint256 id = createParity();
         deliverParity(id);
         usdt.setBlacklisted(feeTo, true);
+        (bool done, bool passed) = lathe.check(id, 64);
+        assertTrue(done && passed);
+        assertEq(uint8(status(id)), uint8(LatheOrders.Status.Paid));
+        uint256 fee = uint256(AMOUNT) * FEE_BPS / 10_000;
+        assertEq(usdt.balanceOf(builder), AMOUNT - fee);
+        assertEq(lathe.feesOwed(), fee);
+        // claiming fails while blocked, and the fee stays owed
         vm.expectRevert(bytes("blacklisted"));
-        lathe.check(id, 64);
-        vm.warp(deadline + lathe.GRACE() + 1);
-        vm.prank(buyer);
-        lathe.refund(id);
-        assertEq(uint8(status(id)), uint8(LatheOrders.Status.Refunded));
+        lathe.claimFees();
+        assertEq(lathe.feesOwed(), fee);
+        // once unblocked, anyone can move it to the fixed recipient
+        usdt.setBlacklisted(feeTo, false);
+        vm.prank(stranger);
+        lathe.claimFees();
+        assertEq(usdt.balanceOf(feeTo), fee);
+        assertEq(lathe.feesOwed(), 0);
+        assertEq(usdt.balanceOf(address(lathe)), 0);
     }
 }
