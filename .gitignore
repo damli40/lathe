@@ -3,3 +3,10 @@
 .env
 assets/logo-variants/
 logo-showcase.html
+docs/superpowers/
+*.private.md
+log.md
+cache/
+out/
+broadcast/
+keystore*
