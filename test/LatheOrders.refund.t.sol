@@ -10,7 +10,7 @@ contract LatheOrdersRefundTest is LatheBase {
 
     function setUp() public override {
         super.setUp();
-        setCircuitFromTable(PAR_ID, builder, 6, 1, parityTable(), 20);
+        setCircuitFromTable(PAR_ID, builder, 6, 1, parityTable(), BATCHED_GATES);
         deadline = uint64(block.timestamp + 1 days);
     }
 

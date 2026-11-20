@@ -1,5 +1,7 @@
 # Gas per case for `check` on the real XOR circuit - 2026-11-20
 
+> **Superseded in part (2026-11-20, later the same day).** Since the per-case gas budget and the inline check (`2026-11-20-eval-gas-budget.md`), the 4-gate XOR is checked inside `deliver`, not with `check`, and the fee is no longer sent in the payout (it is owed and pulled with `claimFees`). The per-case costs below are still the cost of one XOR `eval` round trip; the payout figure now covers one transfer, not two.
+
 ## What this decides
 
 Testing one more case of a delivered circuit costs about **21,600 gas** on the real 4-gate TapeOut XOR circuit. Every `check` call also pays a fixed cost of about **88,000 gas** (re-reading the circuit's shape and netlist to prove it has not changed, and loading the order). The final call that pays the builder adds about **76,000 gas** for the two token transfers.

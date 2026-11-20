@@ -11,8 +11,8 @@ contract LatheOrdersCheckTest is LatheBase {
 
     function setUp() public override {
         super.setUp();
-        setCircuitFromTable(XOR_ID, builder, 2, 1, xorTable(), 4);
-        setCircuitFromTable(PAR_ID, builder, 6, 1, parityTable(), 20);
+        setCircuitFromTable(XOR_ID, builder, 2, 1, xorTable(), BATCHED_GATES);
+        setCircuitFromTable(PAR_ID, builder, 6, 1, parityTable(), BATCHED_GATES);
     }
 
     function status(uint256 id) internal view returns (LatheOrders.Status s) {
@@ -68,12 +68,14 @@ contract LatheOrdersCheckTest is LatheBase {
 
     function test_deliver_rejectsOverMaxGates() public {
         vm.prank(buyer);
-        uint256 id = lathe.createOrder(2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1 days), address(0), 3);
+        uint256 id = lathe.createOrder(
+            2, 1, xorTable(), AMOUNT, uint64(block.timestamp + 1 days), address(0), BATCHED_GATES - 1
+        );
         vm.prank(builder);
         vm.expectRevert(LatheOrders.TooManyGates.selector);
-        lathe.deliver(id, address(proc), XOR_ID); // 4 gates > 3
+        lathe.deliver(id, address(proc), XOR_ID); // BATCHED_GATES > cap
         // exactly at the cap is fine
-        proc.setGateCount(XOR_ID, 3);
+        proc.setGateCount(XOR_ID, BATCHED_GATES - 1);
         vm.prank(builder);
         lathe.deliver(id, address(proc), XOR_ID);
         assertEq(uint8(status(id)), uint8(LatheOrders.Status.Checking));
@@ -119,7 +121,7 @@ contract LatheOrdersCheckTest is LatheBase {
         assertEq(p, address(proc));
         assertEq(cid, XOR_ID);
         assertEq(b, builder);
-        assertEq(g, 4);
+        assertEq(g, BATCHED_GATES);
         assertEq(h, keccak256(proc.netlist(XOR_ID)));
         assertEq(next, 0);
     }
@@ -259,7 +261,7 @@ contract LatheOrdersCheckTest is LatheBase {
     function test_check_revertsIfGateCountChanged() public {
         uint256 id = createXor();
         deliverXor(id);
-        proc.setGateCount(XOR_ID, 5);
+        proc.setGateCount(XOR_ID, BATCHED_GATES + 1);
         vm.expectRevert(LatheOrders.CircuitChanged.selector);
         lathe.check(id, 4);
     }
@@ -303,8 +305,8 @@ contract LatheOrdersCheckTest is LatheBase {
         uint256 id = createXor();
         deliverXor(id);
         proc.setBurnGasEval(XOR_ID, true);
-        uint256 need = lathe.evalBudget(4) * 64 / 63 + lathe.GAS_RESERVE() + 200_000;
-        uint256[3] memory gases = [need, 5 * need, 50 * need];
+        uint256 need = lathe.evalBudget(BATCHED_GATES) * 64 / 63 + lathe.GAS_RESERVE() + 200_000;
+        uint256[3] memory gases = [need, 5 * need, 20 * need];
         uint256 snap = vm.snapshotState();
         for (uint256 i = 0; i < 3; ++i) {
             vm.revertToState(snap);
@@ -322,7 +324,7 @@ contract LatheOrdersCheckTest is LatheBase {
         uint256 id = createParity();
         vm.prank(builder);
         lathe.deliver(id, address(proc), PAR_ID);
-        uint256 budget = lathe.evalBudget(20);
+        uint256 budget = lathe.evalBudget(BATCHED_GATES);
         vm.expectRevert(LatheOrders.InsufficientGasForCase.selector);
         lathe.check{gas: budget}(id, 64); // the budget alone, without the 64/63 headroom
         assertEq(uint8(status(id)), uint8(LatheOrders.Status.Checking));
@@ -333,17 +335,17 @@ contract LatheOrdersCheckTest is LatheBase {
     /// eval gets exactly its budget: a circuit costing a bit under it passes, a bit over it fails, and sending
     /// far more gas does not change the outcome.
     function test_check_budgetIsTheLimit_notCallerGas() public {
-        uint256 budget = lathe.evalBudget(4);
+        uint256 budget = lathe.evalBudget(BATCHED_GATES);
         uint256 id = createXor();
         deliverXor(id);
         proc.setEvalGasCost(XOR_ID, budget * 9 / 10);
-        (, bool passed) = lathe.check{gas: 50 * budget}(id, 4);
+        (, bool passed) = lathe.check{gas: 20 * budget}(id, 4);
         assertTrue(passed, "under budget passes");
 
         id = createXor();
         deliverXor(id);
         proc.setEvalGasCost(XOR_ID, budget * 11 / 10);
-        (bool done, bool passed2) = lathe.check{gas: 50 * budget}(id, 4);
+        (bool done, bool passed2) = lathe.check{gas: 20 * budget}(id, 4);
         assertTrue(done);
         assertFalse(passed2, "over budget is a wrong answer even with plenty of gas");
     }
@@ -424,7 +426,7 @@ contract LatheOrdersCheckTest is LatheBase {
         // 2 inputs, 3 outputs: answers 5,2,7,0 -> bits 101 010 111 000 -> 0x1D5 -> d5 01
         vm.prank(buyer);
         uint256 id = lathe.createOrder(2, 3, hex"d501", AMOUNT, uint64(block.timestamp + 1 days), address(0), 0);
-        setCircuitFromTable(11, builder, 2, 3, hex"d501", 9);
+        setCircuitFromTable(11, builder, 2, 3, hex"d501", BATCHED_GATES);
         vm.prank(builder);
         lathe.deliver(id, address(proc), 11);
         (, bool passed) = lathe.check(id, 4);

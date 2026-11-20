@@ -22,6 +22,9 @@ abstract contract LatheBase is Test {
 
     uint16 constant FEE_BPS = 100;
     uint96 constant AMOUNT = 1_000_000_000; // 1,000 USDT at 6 decimals
+    /// Gate count for fixtures that test the batched check path: big enough that even a 4-case order's
+    /// cases x evalBudget is above INLINE_CHECK_MAX_GAS, so deliver does not check inline (FIX 4).
+    uint32 constant BATCHED_GATES = 500;
 
     function setUp() public virtual {
         usdt = new MockUSDT();

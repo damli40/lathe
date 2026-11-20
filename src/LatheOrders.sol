@@ -59,6 +59,10 @@ contract LatheOrders is ReentrancyGuard {
     /// @notice Largest budget for one case. A circuit above it could never be checked in one X Layer
     /// transaction (block gas limit 210M) and would hold the order until deadline + grace, so deliver refuses it.
     uint256 public constant MAX_CASE_GAS = 100_000_000;
+    /// @notice When cases x evalBudget(gateCount) is at most this, deliver checks every case in the same
+    /// transaction: a wrong answer reverts the delivery, so junk can never hold the order. Larger circuits are
+    /// recorded and checked in batches with check().
+    uint256 public constant INLINE_CHECK_MAX_GAS = 30_000_000;
 
     address public immutable factory;
     IERC20 public immutable usdt;
@@ -100,6 +104,7 @@ contract LatheOrders is ReentrancyGuard {
     error CircuitChanged();
     error InsufficientGasForCase();
     error CircuitTooBigToCheck();
+    error WrongAnswer(uint256 caseIndex);
     error GraceOver();
     error NotBuyer();
     error RefundNotAllowed();
@@ -198,6 +203,20 @@ contract LatheOrders is ReentrancyGuard {
         });
         o.status = Status.Checking;
         emit Delivered(orderId, msg.sender, processor, circuitId);
+
+        _checkInlineIfSmall(orderId, o, gates);
+    }
+
+    /// @dev Small circuit: check every case now and pay. Any wrong answer reverts the whole delivery.
+    function _checkInlineIfSmall(uint256 orderId, Order storage o, uint256 gates) internal {
+        uint256 total = uint256(1) << o.nIn;
+        uint256 budget = evalBudget(gates);
+        if (total * budget > INLINE_CHECK_MAX_GAS) return;
+        Delivery storage d = deliveries[orderId];
+        (bool ok, uint256 c) = _runCases(o, d, tableOf[orderId], 0, total, budget);
+        if (!ok) revert WrongAnswer(c);
+        d.nextCase = uint32(total);
+        _pay(orderId, o, d);
     }
 
     /// @notice Run up to `maxCases` more cases of a delivered circuit. Anyone may call.
@@ -211,25 +230,19 @@ contract LatheOrders is ReentrancyGuard {
         Delivery storage d = deliveries[orderId];
         _requireUnchanged(o, d);
 
-        // V0 orders have no memory bits: cases = 2^nIn and answers are nOut bits. V1 (memory) needs step() and
-        // 2^(nIn+nState) cases with nOut+nState-bit answers; this loop must not be reused for it as is.
-        assert(o.nState == 0);
         uint256 total = uint256(1) << o.nIn;
-        uint256 c = d.nextCase;
-        uint256 end = maxCases >= total - c ? total : c + maxCases;
-        bytes memory table = tableOf[orderId];
-        uint256 budget = evalBudget(d.gateCount);
+        uint256 start = d.nextCase;
+        uint256 end = maxCases >= total - start ? total : start + maxCases;
 
-        for (; c < end; ++c) {
-            if (!_caseMatches(IProcessor(d.processor), d.circuitId, c, o.nIn, o.nOut, table, budget)) {
-                delete deliveries[orderId];
-                o.status = Status.Open;
-                emit Rejected(orderId, c);
-                return (true, false);
-            }
+        (bool ok, uint256 c) = _runCases(o, d, tableOf[orderId], start, end, evalBudget(d.gateCount));
+        if (!ok) {
+            delete deliveries[orderId];
+            o.status = Status.Open;
+            emit Rejected(orderId, c);
+            return (true, false);
         }
-        d.nextCase = uint32(c);
-        if (c < total) return (false, false);
+        d.nextCase = uint32(end);
+        if (end < total) return (false, false);
 
         _pay(orderId, o, d);
         return (true, true);
@@ -280,6 +293,26 @@ contract LatheOrders is ReentrancyGuard {
     /// @notice The gas each case's eval gets for a circuit of `gateCount` gates (REF'd gates included).
     function evalBudget(uint256 gateCount) public pure returns (uint256) {
         return EVAL_BASE_GAS + EVAL_GAS_PER_GATE * gateCount;
+    }
+
+    /// @dev Run cases [from, to). Returns (true, to) if all match, else (false, first wrong case).
+    function _runCases(
+        Order storage o,
+        Delivery storage d,
+        bytes memory table,
+        uint256 from,
+        uint256 to,
+        uint256 budget
+    ) internal view returns (bool, uint256) {
+        // V0 orders have no memory bits: cases = 2^nIn, answers are nOut bits, eval not step. V1 (memory) needs
+        // step() and 2^(nIn+nState) cases with nOut+nState-bit answers; this loop must not be reused for it as is.
+        assert(o.nState == 0);
+        IProcessor p = IProcessor(d.processor);
+        uint256 id = d.circuitId;
+        for (uint256 c = from; c < to; ++c) {
+            if (!_caseMatches(p, id, c, o.nIn, o.nOut, table, budget)) return (false, c);
+        }
+        return (true, to);
     }
 
     /// @dev One case. eval gets exactly `budget` gas. If the caller cannot give it that much, the whole call

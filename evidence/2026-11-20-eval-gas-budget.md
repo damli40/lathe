@@ -30,6 +30,23 @@ Other constants:
 - `GAS_RESERVE = 20,000`: before each case, `check` requires `gasleft() >= budget × 64/63 + 20,000`, so the call really receives the full budget (a call can pass on at most 63/64 of the gas left, EIP-150). Otherwise it reverts `InsufficientGasForCase`.
 - `MAX_CASE_GAS = 100,000,000`: `deliver` refuses a circuit whose one-case budget is above this (`CircuitTooBigToCheck`), about 6,660 gates. A larger circuit could not be checked in one X Layer transaction (block gas limit 210,000,000, read with `cast block` on 2026-11-20) and would hold the order until deadline + grace.
 
+## Inline check at delivery (FIX 4)
+
+`INLINE_CHECK_MAX_GAS = 30,000,000`. When `cases × evalBudget(gateCount)` is at most this, `deliver` runs every case in the same transaction and reverts `WrongAnswer(case)` on the first wrong one, so a junk delivery never holds the order. Above it, the delivery is recorded and checked in batches with `check`, as before.
+
+What fits inline (largest gate count, REF'd gates included):
+
+| Inputs | Cases | Largest inline gateCount |
+|---|---|---|
+| 1 | 2 | 993 |
+| 2 | 4 | 493 |
+| 3 | 8 | 243 |
+| 4 | 16 | 118 |
+| 5 | 32 | 55 |
+| 6 | 64 | 24 |
+
+The 30M figure is a worst-case cap (every case using its whole budget), not what a delivery costs. The real XOR delivered inline used 347,941 gas for `deliver` + 4 cases + payout (`test_fork_gasInlineDeliver` in `test/fork/XorFork.t.sol`, `--isolate`). The transaction's gas limit must still leave `evalBudget × 64/63 + 20,000` free at each case, so wallets that estimate gas will ask for a limit somewhat above the gas used.
+
 ## How it was measured
 
 - Test: `test_fork_budgetMargin` and `test_fork_gasBombRejectedDeterministically` in `test/fork/EvalBudget.fork.t.sol`.
