@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://esm.sh; style-src 'self' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net; img-src 'self' data:; connect-src 'self' https://esm.sh https://cdn.jsdelivr.net https://testrpc.xlayer.tech https://rpc.xlayer.tech; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark light">
+  <title>Lathe</title>
+  <meta name="description" content="">
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/latin-400.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/latin-500.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/latin-600.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-mono@5.2.5/latin-400.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-mono@5.2.5/latin-500.css">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="modulepreload" href="app.js">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#order" data-i18n="tool.ui.skip"></a>
+
+  <header class="nav">
+    <div class="wrap nav-row">
+      <a class="brand" href="#top">
+        <img src="logo.svg" alt="" width="28" height="28">
+        <span data-i18n="tool.ui.brand"></span>
+      </a>
+      <nav class="nav-links" aria-label="Lathe">
+        <a href="#how" data-i18n="nav.how"></a>
+        <a href="#proof" data-i18n="nav.proof"></a>
+        <a href="#order" data-i18n="nav.order"></a>
+        <a href="https://github.com/damli40/lathe" data-i18n="nav.github" rel="noopener"></a>
+      </nav>
+      <div class="nav-controls">
+        <div class="seg seg-sm" role="group" data-i18n-aria="tool.ui.langLabel">
+          <button type="button" data-lang="en" data-i18n="tool.ui.langEn" lang="en"></button>
+          <button type="button" data-lang="zh" data-i18n="tool.ui.langZh" lang="zh-CN"></button>
+        </div>
+        <button type="button" class="btn btn-quiet btn-sm" id="theme-toggle"></button>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero wrap">
+      <div class="hero-text">
+        <h1 data-i18n="hero.headline"></h1>
+        <p class="hero-sub" data-i18n="hero.sub"></p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#order-create" data-tab-link="create" data-i18n="hero.ctaCreate"></a>
+          <a class="btn btn-ghost" href="#order-lookup" data-tab-link="lookup" data-i18n="hero.ctaLookup"></a>
+        </div>
+      </div>
+      <div class="hero-fig" id="fig-host">
+        <img class="hero-logo" id="fig-fallback" src="logo.svg" alt="" data-i18n-alt="tool.ui.logoAlt" width="620" height="620">
+      </div>
+    </section>
+
+    <section class="problem wrap" aria-labelledby="problem-h">
+      <h2 id="problem-h" data-i18n="problem.heading"></h2>
+      <p data-i18n="problem.body"></p>
+    </section>
+
+    <section class="how wrap" id="how" aria-labelledby="how-h">
+      <h2 id="how-h" data-i18n="how.heading"></h2>
+      <ol class="stairs" id="how-steps"></ol>
+    </section>
+
+    <section class="proof wrap" id="proof" aria-labelledby="proof-h">
+      <h2 id="proof-h" data-i18n="proof.heading"></h2>
+      <div class="proof-grid">
+        <article class="proof-item proof-lead">
+          <h3 data-i18n="proof.items.0.title"></h3>
+          <p data-i18n="proof.items.0.body"></p>
+          <a href="https://github.com/damli40/lathe/blob/main/test/fork/XorFork.t.sol" rel="noopener" data-i18n="proof.items.0.link"></a>
+        </article>
+        <article class="proof-item">
+          <h3 data-i18n="proof.items.1.title"></h3>
+          <p data-i18n="proof.items.1.body"></p>
+          <a href="https://github.com/damli40/lathe/blob/main/evidence/2026-11-20-testnet-v0.md" rel="noopener" data-i18n="proof.items.1.link"></a>
+        </article>
+        <article class="proof-item proof-count">
+          <h3 data-i18n="proof.items.2.title"></h3>
+          <p data-i18n="proof.items.2.body"></p>
+          <a href="https://github.com/damli40/lathe/blob/main/evidence/README.md" rel="noopener" data-i18n="proof.items.2.link"></a>
+        </article>
+      </div>
+    </section>
+
+    <section class="limits wrap" aria-labelledby="limits-h">
+      <h2 id="limits-h" data-i18n="limits.heading"></h2>
+      <ul class="limits-grid" id="limits-list"></ul>
+    </section>
+
+    <section class="tool wrap" id="order" aria-labelledby="tool-h">
+      <div class="tool-head">
+        <h2 id="tool-h"></h2>
+        <p id="tool-sub"></p>
+      </div>
+
+      <div class="toolbar">
+        <fieldset class="field-inline">
+          <legend data-i18n="tool.network.label"></legend>
+          <div class="seg" id="net-seg">
+            <label><input type="radio" name="net" value="testnet"><span data-i18n="tool.network.testnet"></span></label>
+            <label><input type="radio" name="net" value="mainnet"><span data-i18n="tool.network.mainnet"></span></label>
+          </div>
+        </fieldset>
+        <div class="wallet" id="wallet">
+          <p class="wallet-status mono" id="wallet-status" aria-live="polite"></p>
+          <button type="button" class="btn btn-ghost" id="connect-btn" data-i18n="tool.wallet.connect"></button>
+        </div>
+      </div>
+
+      <div class="netbar" id="netbar" role="alert" hidden>
+        <p id="netbar-text"></p>
+        <button type="button" class="btn btn-primary btn-sm" id="netbar-btn"></button>
+      </div>
+
+      <div class="notice" id="tool-notice" hidden></div>
+
+      <div class="tool-body" id="tool-body">
+        <div class="tabs" role="tablist" aria-labelledby="tool-h">
+          <button type="button" role="tab" id="tab-create" aria-controls="order-create" data-tab="create" data-i18n="tool.tabs.create"></button>
+          <button type="button" role="tab" id="tab-lookup" aria-controls="order-lookup" data-tab="lookup" data-i18n="tool.tabs.lookup"></button>
+        </div>
+
+        <div class="panel" role="tabpanel" id="order-create" aria-labelledby="tab-create">
+          <form class="create" id="create-form" novalidate>
+            <div class="create-fields">
+              <fieldset class="field">
+                <legend data-i18n="tool.create.inputsLabel"></legend>
+                <p class="help" id="nin-help" data-i18n="tool.create.inputsHelp"></p>
+                <div class="seg" id="nin-seg"></div>
+              </fieldset>
+
+              <div class="field">
+                <label for="f-nout" data-i18n="tool.create.outputsLabel"></label>
+                <p class="help" id="nout-help"></p>
+                <input class="input mono" id="f-nout" type="number" inputmode="numeric" min="1" max="16" step="1" value="1" aria-describedby="nout-help nout-err">
+                <p class="err" id="nout-err" aria-live="polite"></p>
+                <p class="help" id="nout-note" aria-live="polite"></p>
+              </div>
+
+              <div class="field">
+                <label for="f-amount" id="amount-label"></label>
+                <p class="help" id="amount-help"></p>
+                <input class="input mono" id="f-amount" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" value="1" aria-describedby="amount-help amount-err">
+                <p class="err" id="amount-err" aria-live="polite"></p>
+                <p class="help" id="payout-line"></p>
+                <p class="help" id="balance-line"></p>
+                <div class="mint" id="mint-row" hidden>
+                  <button type="button" class="btn btn-ghost btn-sm" id="mint-btn"></button>
+                  <p class="help" data-i18n="tool.create.mintHelp"></p>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="f-deadline" data-i18n="tool.create.deadlineLabel"></label>
+                <p class="help mono-nums" id="deadline-help"></p>
+                <input class="input mono" id="f-deadline" type="datetime-local" step="60" aria-describedby="deadline-help deadline-err">
+                <p class="err" id="deadline-err" aria-live="polite"></p>
+              </div>
+
+              <div class="field">
+                <label for="f-builder" data-i18n="tool.create.builderLabel"></label>
+                <p class="help" id="builder-help" data-i18n="tool.create.builderHelp"></p>
+                <div class="input-row">
+                  <input class="input mono" id="f-builder" type="text" autocomplete="off" spellcheck="false" aria-describedby="builder-help builder-err">
+                  <button type="button" class="btn btn-ghost" id="use-mine" data-i18n="tool.create.useMine"></button>
+                </div>
+                <p class="err" id="builder-err" aria-live="polite"></p>
+              </div>
+
+              <div class="field">
+                <label for="f-maxgates" data-i18n="tool.create.maxGatesLabel"></label>
+                <p class="help" id="maxgates-help"></p>
+                <input class="input mono" id="f-maxgates" type="text" inputmode="numeric" autocomplete="off" aria-describedby="maxgates-help maxgates-err">
+                <p class="err" id="maxgates-err" aria-live="polite"></p>
+                <p class="help" id="maxgates-note"></p>
+              </div>
+            </div>
+
+            <div class="create-table">
+              <div class="table-head">
+                <h3 class="label-like" id="table-label" data-i18n="tool.create.tableLabel"></h3>
+                <p class="help" data-i18n="tool.create.tableHelp"></p>
+                <div class="presets">
+                  <p class="help" id="presets-label" data-i18n="tool.create.presetsLabel"></p>
+                  <div class="preset-row" id="preset-row" role="group" aria-labelledby="presets-label"></div>
+                </div>
+              </div>
+              <div class="tt-scroll" id="tt-wrap"></div>
+              <p class="help bytes-line"><span data-i18n="tool.create.tableBytes"></span> <code class="mono" id="table-hex"></code></p>
+            </div>
+
+            <div class="send" id="send-steps">
+              <div class="send-step" id="step-approve">
+                <h3 data-i18n="tool.create.approveTitle"></h3>
+                <p class="help" id="approve-note"></p>
+                <button type="button" class="btn btn-primary" id="approve-btn"></button>
+                <div class="txline" id="approve-tx"></div>
+              </div>
+              <div class="send-step" id="step-create">
+                <h3 data-i18n="tool.create.createTitle"></h3>
+                <p class="help" id="create-note"></p>
+                <button type="button" class="btn btn-primary" id="create-btn" data-i18n="tool.create.createBtn"></button>
+                <div class="txline" id="create-tx"></div>
+              </div>
+            </div>
+            <div class="result" id="create-result" hidden></div>
+          </form>
+        </div>
+
+        <div class="panel" role="tabpanel" id="order-lookup" aria-labelledby="tab-lookup" hidden>
+          <form class="lookup" id="lookup-form" novalidate>
+            <div class="field">
+              <label for="f-lookup" data-i18n="tool.lookup.label"></label>
+              <p class="help" id="lookup-help" data-i18n="tool.lookup.help"></p>
+              <div class="input-row">
+                <input class="input mono" id="f-lookup" type="text" inputmode="numeric" autocomplete="off" aria-describedby="lookup-help lookup-err">
+                <button type="submit" class="btn btn-primary" data-i18n="tool.lookup.btn"></button>
+              </div>
+              <p class="err" id="lookup-err" aria-live="polite"></p>
+            </div>
+          </form>
+          <div class="order-view" id="order-view" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap foot-row">
+      <p data-i18n="footer.line"></p>
+      <div class="foot-contracts-wrap">
+        <p class="foot-label" data-i18n="footer.contract"></p>
+        <dl class="foot-contracts">
+          <div>
+            <dt data-i18n="tool.network.testnet"></dt>
+            <dd class="mono" id="foot-testnet"></dd>
+          </div>
+          <div>
+            <dt data-i18n="tool.network.mainnet"></dt>
+            <dd id="foot-mainnet"></dd>
+          </div>
+        </dl>
+      </div>
+      <a href="https://github.com/damli40/lathe" rel="noopener" data-i18n="nav.github"></a>
+    </div>
+  </footer>
+</body>
+</html>

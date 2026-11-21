@@ -1,0 +1,108 @@
+/* The figure's own styles. build.mjs scopes every selector under .lathe-fig and appends them after the kit's. */
+.lathe-fig{
+  --lathe-paper:#0b0b0c;
+  --anatomy-page:var(--lathe-paper);--anatomy-card:var(--lathe-paper);--anatomy-paper:var(--lathe-paper);
+  --anatomy-shade-0:#121214;--anatomy-shade-1:#18181b;--anatomy-shade-2:#1f1f22;--anatomy-shade-3:#26262a;
+  --anatomy-top:#2e2e33;--anatomy-face:#242428;--anatomy-lit-top:#7a7a80;--anatomy-lit-shade:#4e4e54;
+  --anatomy-hi:#f0f0f0;--anatomy-mid:#a2a2a8;--anatomy-lo:#6c6c72;--anatomy-faint:#424247;--anatomy-lit:#ffffff;--anatomy-halo:#000;--anatomy-halo-opacity:.85;
+  --lf-hole:#000;--lf-card:#2c2c31;--lf-coin-top:#d6d6d8;--lf-coin-side:#8e8e94;--lf-glow:#bdbdbd;--lf-glow-top:#ececec;--lf-glow-edge:#f4f4f4;--lf-shadow:#000;
+  display:block;width:100%;max-width:100%;box-sizing:border-box;color:var(--anatomy-text);
+  font:13px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.lathe-fig[data-theme="light"]{
+  --lathe-paper:#f4f4f2;
+  --anatomy-shade-0:#d9d9d7;--anatomy-shade-1:#e0e0de;--anatomy-shade-2:#e8e8e6;--anatomy-shade-3:#eeeeec;
+  --anatomy-top:#fbfbfa;--anatomy-face:#fdfdfc;--anatomy-lit-top:#ffffff;--anatomy-lit-shade:#f1f1ef;
+  --anatomy-shade-0:color-mix(in srgb,var(--lathe-paper),#000 11%);
+  --anatomy-shade-1:color-mix(in srgb,var(--lathe-paper),#000 8%);
+  --anatomy-shade-2:color-mix(in srgb,var(--lathe-paper),#000 5%);
+  --anatomy-shade-3:color-mix(in srgb,var(--lathe-paper),#000 2.4%);
+  --anatomy-top:color-mix(in srgb,var(--lathe-paper),#fff 70%);
+  --anatomy-face:color-mix(in srgb,var(--lathe-paper),#fff 85%);
+  --anatomy-lit-top:#ffffff;
+  --anatomy-lit-shade:color-mix(in srgb,var(--lathe-paper),#fff 30%);
+  --anatomy-hi:#1f1f22;--anatomy-halo:#7a7a72;--anatomy-halo-opacity:.3;
+  --lf-hole:#2a2a2c;--lf-card:#ffffff;--lf-coin-top:#3a3a3e;--lf-coin-side:#1f1f22;--lf-glow:#3e3e42;--lf-glow-top:#5a5a5e;--lf-glow-edge:#000;--lf-shadow:#8a8a86;
+}
+.lathe-fig *,.lathe-fig *::before,.lathe-fig *::after{box-sizing:border-box}
+.lathe-fig .lf-figure{margin:0}
+.lathe-fig .lf-plate{position:relative;padding:16px 18px 14px;background:var(--lathe-paper);box-shadow:0 0 0 1px var(--anatomy-faint)}
+.lathe-fig .lf-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px 20px}
+.lathe-fig .lf-bottom{align-items:flex-end;min-height:2.7em}
+.lathe-fig .iso-plate-corner{color:var(--anatomy-muted);font-family:var(--anatomy-mono);font-size:10.5px;line-height:1.35;letter-spacing:.04em;overflow-wrap:anywhere}
+.lathe-fig .iso-plate-corner[data-corner="fig"]{color:var(--anatomy-text);flex:none}
+.lathe-fig .iso-plate-corner[data-corner="title"]{text-transform:uppercase;letter-spacing:.1em;text-align:right}
+.lathe-fig .iso-plate-corner[data-corner="hint"]{text-transform:uppercase;letter-spacing:.08em;flex:1 1 40%;max-width:46%}
+.lathe-fig .iso-plate-corner[data-corner="readout"]{color:var(--anatomy-strong);text-align:right;font-variant-numeric:tabular-nums;flex:1 1 54%;max-width:58%}
+.lathe-fig .lf-stage{margin:4px -4px 2px}
+.lathe-fig .lf-stage .iso-svg{display:block;width:100%;height:auto;overflow:visible}
+.lathe-fig .iso-legend{margin-top:12px}
+.lathe-fig .lf-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+@media (max-width:480px){
+  .lathe-fig .lf-plate{padding:12px 10px 10px}
+  .lathe-fig .lf-stage{margin:2px -6px}
+  .lathe-fig .iso-plate-corner{font-size:10px}
+}
+
+/* the chip: hit area, focus ring, good and faulty art */
+.lathe-fig .lf-hit{cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent}
+.lathe-fig .lf-hit-area{fill:transparent;stroke:none}
+.lathe-fig .lf-focus{fill:none;stroke:var(--anatomy-muted);stroke-width:.8px;stroke-dasharray:2 2;opacity:0;vector-effect:non-scaling-stroke;transition:opacity .2s}
+.lathe-fig .lf-hit:focus-visible .lf-focus{opacity:1}
+.lathe-fig[data-chip="good"] .lf-faulty,.lathe-fig[data-chip="faulty"] .lf-good{display:none}
+.lathe-fig[data-chip="good"] .lf-spare-good,.lathe-fig[data-chip="faulty"] .lf-spare-faulty{display:none}
+
+/* toggles: bat 0 or bat 1 */
+.lathe-fig .it[data-sw]:not([data-on]) .lf-b1,.lathe-fig .it[data-sw][data-on] .lf-b0{display:none}
+
+/* flap: two poses */
+.lathe-fig [data-part="flap"]:not([data-flap="builder"]) .lf-flap-builder,.lathe-fig [data-part="flap"][data-flap="builder"] .lf-flap-buyer{display:none}
+
+/* the table card */
+.lathe-fig .lf-hole{fill:var(--lf-hole);stroke:none}
+.lathe-fig .lf-mark{stroke-width:1.1px}
+
+/* comparator lamp */
+.lathe-fig .lf-lamp[data-on] .iso-solid[data-seamless]>.iso-shade[data-shade],.lathe-fig .lf-lamp[data-on] .iso-solid>.iso-shade[data-shade]{fill:var(--lf-glow);stroke:var(--lf-glow)}
+.lathe-fig .lf-lamp[data-on] .iso-solid[data-seamless]>.iso-top,.lathe-fig .lf-lamp[data-on] .iso-solid>.iso-top{fill:var(--lf-glow-top);stroke:var(--lf-glow-top)}
+.lathe-fig .lf-lamp[data-on] .iso-fill{fill:var(--lf-glow)}
+.lathe-fig .lf-lamp[data-on] .iso-edge{stroke:var(--lf-glow-edge)}
+
+/* counter window */
+.lathe-fig .lf-window{fill:var(--anatomy-shade-0);stroke:none}
+.lathe-fig .lf-digit{fill:var(--anatomy-hi);font-family:var(--anatomy-mono);font-weight:500}
+.lathe-fig .lf-shadow{fill:var(--lf-shadow);opacity:.35}
+
+/* deadline mark */
+.lathe-fig .lf-dead{fill:var(--anatomy-hi);stroke:none}
+
+/* one lit accent: the chip until the latch opens, then the coin until the next run */
+.lathe-fig[data-accent="coin"] [data-part="chip"] .iso-solid[data-lit]>.iso-top,
+.lathe-fig:not([data-accent="coin"]) .lf-coin .iso-solid[data-lit]>.iso-top{fill:var(--anatomy-top)}
+.lathe-fig[data-accent="coin"] [data-part="chip"] .iso-solid[data-lit]>.iso-fill,
+.lathe-fig:not([data-accent="coin"]) .lf-coin .iso-solid[data-lit]>.iso-fill{fill:var(--anatomy-paper)}
+.lathe-fig[data-accent="coin"] [data-part="chip"] .iso-solid[data-lit]>.iso-shade,
+.lathe-fig:not([data-accent="coin"]) .lf-coin .iso-solid[data-lit]>.iso-shade{fill:var(--anatomy-shade-2)}
+.lathe-fig[data-accent="coin"] [data-part="chip"] .iso-solid[data-lit]>.iso-edge,
+.lathe-fig:not([data-accent="coin"]) .lf-coin .iso-solid[data-lit]>.iso-edge{stroke:var(--anatomy-hi)}
+.lathe-fig[data-accent="coin"] [data-part="chip"] .iso-solid[data-seamless][data-lit]>.iso-shade,
+.lathe-fig:not([data-accent="coin"]) .lf-coin .iso-solid[data-seamless][data-lit]>.iso-shade{stroke:var(--anatomy-shade-2)}
+.lathe-fig[data-accent="coin"] [data-part="chip"] .iso-solid[data-seamless][data-lit]>.iso-top,
+.lathe-fig:not([data-accent="coin"]) .lf-coin .iso-solid[data-seamless][data-lit]>.iso-top{stroke:var(--anatomy-top)}
+
+.lathe-fig .lf-hand{stroke-width:1.2px}
+
+/* narrow hosts: the hint and the readout each get the full width, so each fits in two lines */
+.lathe-fig[data-narrow] .lf-bottom{flex-direction:column-reverse;align-items:stretch;gap:4px;min-height:0}
+.lathe-fig[data-narrow] .iso-plate-corner[data-corner="hint"],.lathe-fig[data-narrow] .iso-plate-corner[data-corner="readout"]{max-width:none;flex:none;text-align:left}
+.lathe-fig[data-narrow] .iso-plate-corner[data-corner="hint"]{text-transform:none;letter-spacing:.02em}
+.lathe-fig[data-narrow] .iso-plate-corner[data-corner="readout"]{font-size:11.5px}
+.lathe-fig[data-narrow] .lf-plate{padding:12px 10px 10px}
+.lathe-fig[data-narrow] .lf-stage{margin:4px -4px 6px}
+
+.lathe-fig .lf-cardface{fill:var(--lf-card);stroke:none}
+.lathe-fig[data-accent="coin"] .lf-coin .iso-solid>.iso-top{fill:var(--lf-coin-top)}
+.lathe-fig[data-accent="coin"] .lf-coin .iso-solid>.iso-shade{fill:var(--lf-coin-side)}
+.lathe-fig[data-accent="coin"] .lf-coin .iso-solid[data-seamless]>.iso-top{stroke:var(--lf-coin-top)}
+.lathe-fig[data-accent="coin"] .lf-coin .iso-solid[data-seamless]>.iso-shade{stroke:var(--lf-coin-side)}

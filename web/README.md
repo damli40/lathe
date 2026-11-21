@@ -1,0 +1,101 @@
+# Lathe web page
+
+One static page: the pitch on top, the working order tool below, in English and Simplified Chinese.
+Plain HTML, CSS and ES modules. No framework, no build step, nothing to install.
+
+## Run it
+
+Serve this folder with any static server, for example from the repo root:
+
+```sh
+python3 -m http.server -d web 8080   # then open http://127.0.0.1:8080/
+```
+
+Opening `index.html` as a file does not work: ES modules need http.
+
+## Files
+
+| File | What it does |
+|---|---|
+| `index.html` | Markup only. Every visible string is filled in from `i18n.js`. Holds the Content-Security-Policy. |
+| `styles.css` | All styles. Colour tokens for dark and light; the corner and accent rules are at the top. |
+| `app.js` | Language, theme, the hero figure, and the order tool (create, look up, deliver, check, refund). |
+| `i18n.js` | The merged string dictionary: `pitch` from `i18n.pitch.js` plus the tool strings, EN and ZH. |
+| `i18n.pitch.js` | Pitch copy (owned by the page owner, not edited here). |
+| `config.js` | Network settings. Mainnet goes live by filling in one address: `NETWORKS.mainnet.lathe`. |
+| `table.js` | Truth-table encoder and decoder, the same rule as `src/TableLib.sol`. Pure functions. |
+| `gas.js` | Gas limits, inline-check rule, amount parsing. Pure functions. |
+| `abi.json` | `LatheOrders` ABI, extracted from `out/LatheOrders.sol/LatheOrders.json`. |
+| `logo.svg` | Copy of `assets/logo.svg`; shown large in the hero when the figure is missing. |
+| `figure.js`, `figure.css` | The hero drawing, built separately. Loaded only if present; the page works without them. |
+
+Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mono `5.2.5` from jsDelivr (`@fontsource`).
+
+## How the tool behaves
+
+- Reads go through the public RPC, so the order view and the create form work with no wallet.
+  Testnet reads may run in parallel. On mainnet (its RPC returns 403 under parallel load) every request the page
+  makes, including receipt polling, goes through one queue, so at most one is in flight at a time
+  (`parallelReads: false` in `config.js`; `web/test/fixround.mjs` measures this through a proxy).
+- The contract's constants (gas budget, inline limit, grace period, token, fee rate) are read from the contract,
+  then cached in localStorage per chain id and contract address. A cached entry with a wrong type or an
+  out-of-range value is thrown away and read again. The token's decimals are read again before any amount is sent.
+  Nothing breaks if storage is blocked.
+- The fee is shown where it matters: under the amount and on the order view ("The builder receives ... after the
+  1% fee"). With a 0 fee nothing extra is shown.
+- `deliver` and `check` are sent with an explicit gas limit: each case must hold
+  `evalBudget * 64/63 + GAS_RESERVE` before the circuit runs, so a wallet's estimate is too low. The page also
+  runs the call first (`eth_call`) and sends nothing if the contract would refuse, for example `WrongAnswer(3)`,
+  which it shows as a sentence and a highlighted row.
+- Both public X Layer RPCs run `eth_call` with at most 50,000,000 gas, whatever the call asks for. The page keeps
+  every simulation under 48M: `deliver` always fits (at most about 35M inline); a `check` simulation runs only as
+  many cases as fit, and when not even one case fits (circuits above 2,995 gates) the check is sent without a test
+  run, which the check box says. A check that fails on chain only costs its gas; it cannot move money.
+- A transaction that is mined but fails is reported as a failure, never as progress. If the hash is known but the
+  receipt cannot be read, the page says so and names the hash; the create button stays locked until the receipt
+  turns up.
+- Claim fees is left out on purpose: `claimFees()` sends fees to the fixed fee recipient, so it is no use to a visitor.
+- Explorer links: none. When checked on 2026-11-21, neither OKLink nor the OKX explorer resolved a known chain-1952
+  transaction, so hashes are shown as copyable text. Set `explorerTx` in `config.js` once a format is confirmed.
+
+## Tests
+
+All commands run from the repo root. The browser tests use an existing Playwright install outside the repo
+(default `~/Desktop/career-ops/node_modules/playwright`; set `PLAYWRIGHT_DIR` to use another). Nothing is installed
+into the repo. Anvil signs for its own unlocked default account, so no private key is used anywhere.
+
+```sh
+# 1. Encoder and gas unit tests (vectors copied from the Solidity tests)
+node --test web/test/
+
+# 2. End to end on a local anvil: deploys the testnet mocks with script/DeployTestnet.s.sol, then through the page:
+#    XOR order + honest circuit 1 = Paid; XOR order + wrong circuit 2 = refusal sentence + failing row, nothing sent;
+#    short-deadline order, anvil time moved on, refund = Refunded
+node web/test/e2e.mjs
+
+# 3. Mainnet fork: deploys LatheOrders + a mock token on an anvil fork of X Layer and delivers the real
+#    TapeOut XOR circuit (processor 0x839bdD6fa7A66416A609A735e11DE5411B98574e, id 1) through the page
+node web/test/fork.mjs
+
+# 4. Read-only against the live testnet contract, no wallet: orders 1, 2, 3 = Paid, Open, Refunded
+node web/test/readonly.mjs
+
+# 5. Fix-round checks through a proxy that caps eth_call at 50M gas like the public nodes: 4,000-gate circuit
+#    checked to Paid, clipped simulation, reverted check, account switch mid-read, receipt not readable,
+#    wrong-network bar, ticking gates, commas, fee line, outputs field, grid keys, at most one request in flight
+node web/test/fixround.mjs
+
+# 6. Screenshots at 1440x900 and 390x844, dark and light, EN and ZH; fails on horizontal scroll
+SHOTS_DIR=/tmp/lathe-shots node web/test/shots.mjs
+```
+
+The browser tests turn off the page's CSP (`bypassCSP`) only so the testnet or mainnet entry can point at
+`127.0.0.1`; `readonly.mjs` and `shots.mjs` run with the real CSP. Forge output for the tests goes to a temp folder,
+so the repo's `broadcast/` record is not touched.
+
+## Security notes
+
+- Chain data and URL parameters reach the page only as text (`textContent`), never `innerHTML`.
+- Addresses are checked with viem's `isAddress`. There is no private-key input of any kind.
+- The CSP allows only this site, esm.sh, jsDelivr and the two X Layer RPC hosts. `frame-ancestors` cannot be set
+  from a meta tag; set it as an HTTP header on the host if framing must be blocked.

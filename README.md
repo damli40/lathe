@@ -6,7 +6,7 @@ Pay only when circuits pass.
 
 Order a small TapeOut circuit on X Layer, lock the USDT up front, and the builder gets paid only when the circuit gives the right answer for every possible input. A contract runs the check. No reviewer decides.
 
-Status: design stage, entered in X Layer TapeOut Accelerate (deadline Dec 7, 2026). No contract is deployed yet. This README describes the plan and the checks behind it.
+Status: entered in X Layer TapeOut Accelerate (deadline Dec 7, 2026). The order contract and the order page are built. The contract runs on X Layer testnet at `0xDF3B0240Ed38d267De67e9Ed3Bad66F0Db8747fD` with stand-in circuits, because TapeOut is not on testnet. It is not on mainnet yet. Test records are in [evidence/](evidence/README.md).
 
 ## The problem
 
@@ -47,7 +47,7 @@ Not yet tested: a contract calling a circuit chosen at claim time inside one tra
 ## Roadmap to Dec 7
 
 - [ ] Order contract on X Layer mainnet (lock, deliver, check in batches, pay, refund)
-- [ ] Order page in English and Chinese
+- [x] Order page in English and Chinese (`web/`, run it locally: see [web/README.md](web/README.md))
 - [ ] One real order paid on mainnet, funded by someone other than the author
 - [ ] Demo video
 
