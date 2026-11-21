@@ -6,7 +6,7 @@ Pay only when circuits pass.
 
 Order a small TapeOut circuit on X Layer, lock the USDT up front, and the builder gets paid only when the circuit gives the right answer for every possible input. A contract runs the check. No reviewer decides.
 
-Status: entered in X Layer TapeOut Accelerate (deadline Dec 7, 2026). The order contract and the order page are built, including one-bit memory circuits, receipts, input names and orders made of two pieces (the page shows pieced orders read-only for now). The contract runs on X Layer testnet at `0x1E96e90E25E25b6fcb8cc28aa883d5a5df2715f4` with stand-in circuits, because TapeOut is not on testnet. It is not on mainnet yet. Test records are in [evidence/](evidence/README.md).
+Status: entered in X Layer TapeOut Accelerate (deadline Dec 7, 2026). The order contract and the order page are built, including one-bit memory circuits, receipts, input names, and orders made of up to 8 wired pieces, optionally delivered at the end as one top circuit (the page shows pieced orders read-only for now). The wired pieces and the top circuit run on local test chains only so far. The contract runs on X Layer testnet at `0x1E96e90E25E25b6fcb8cc28aa883d5a5df2715f4` with stand-in circuits, because TapeOut is not on testnet. It is not on mainnet yet. Test records are in [evidence/](evidence/README.md).
 
 ## The problem
 
@@ -28,7 +28,7 @@ A passed circuit stays on-chain and anyone can rerun it for free, so any app can
 
 A table can only cover 6 inputs. A rule like "the amount is at least the limit, and two of three people approved" has 19 inputs. Its table would have 524,288 rows, and no one can check that many cases through one circuit.
 
-So a buyer can split the rule into one or two **pieces**. Each piece is its own circuit, with no memory, delivered on its own with `deliverPiece`. A piece is one of:
+So a buyer can split the rule into **pieces**: one or two in the fixed wiring below, or up to 8 with wires the buyer lists. Each piece is its own circuit, with no memory, delivered on its own with `deliverPiece`. A piece is one of:
 
 - a **table**, like a normal order, up to 6 inputs;
 - a **formula** the contract works out itself, so no table is stored: "a is at least b" (one output) or "a plus b", on two numbers of up to 17 input bits together. a is the first input bits, b the ones after it, each lowest bit first.
@@ -37,10 +37,21 @@ So a buyer can split the rule into one or two **pieces**. Each piece is its own 
 
 **Why the joined rule is right.** The pieces are wired in one fixed way. The second piece gets the first piece's outputs as its first inputs, then the order's remaining inputs. Since each piece is right on all of its own inputs and the wiring is fixed, the joined rule is right too. The joined rule is not checked again as a whole. `run` on a paid order joins the pieces the same way.
 
+**Wired pieces (up to 8).** The buyer can instead list every wire: which order input or which earlier piece's output bit feeds each piece input, and which piece output bits are the order's outputs. A piece can only be fed by the order's inputs or by an earlier piece, every piece input and order output gets exactly one wire, and every order input must feed something; any other list is refused when the order is made. [examples/daily-cap.json](examples/daily-cap.json) is a daily spending cap: piece 1 adds "spent today" and "this amount" (two 8-bit numbers), piece 2 asks "is the cap at least that sum". The same argument holds: each piece is checked on all its inputs and the contract always wires them as listed.
+
+**One circuit at the end (a "top circuit").** When the order is made, the buyer picks one of two kinds, fixed from then on:
+
+- **Lathe joins**: the order pays when the last piece passes, and the contract joins the pieces each time the rule runs.
+- **Needs a top circuit**: after every piece has passed, the builder delivers one more circuit (`deliverTop`) made only of links to the tested piece circuits (TapeOut's REF records), wired as the order says. The contract builds the exact bytes that circuit must have (`expectedTopNetlist`) and compares their hash with the delivered circuit's, plus its input and output counts. If they match, the order pays and `ruleOf` names that one circuit, so other contracts can use the rule as a single circuit. The top circuit is not checked case by case: its bytes say "run these tested circuits, wired this way", and nothing else, so it is right because the pieces are. The builder has until one day after the deadline to deliver it; refunds follow the same rules as before.
+
+Not every wiring can be one top circuit: TapeOut takes a circuit's outputs from its last wires, so the order's outputs must be the last output bits of the last piece(s), in order. Other wirings are refused as "needs a top circuit" (`TopNeedsLastOutputs`) but can still be ordered as "Lathe joins".
+
+**What the daily cap costs to check.** About 1,210 transactions and 0.68 OKB if each piece is a small circuit of about 70 gates; the transaction count is from the crank's own plan, the gas from stand-in circuits that burn what a real circuit that size is estimated to burn ([evidence](evidence/2026-11-21-daily-cap-check-cost.md)). At 150 gates per piece it is about 1.4 OKB, at 650 gates about 6 OKB, so the buyer should cap the pieces' gates.
+
 **What can still go wrong.**
 
 - A piece that passed cannot be replaced. If TapeOut's owners change a passed piece's circuit before the order pays (they can upgrade the processor code), the payout refuses (`CircuitChanged`) and the order can never pay. The buyer then takes the money back after the deadline and its one-day grace.
-- Running a paid two-piece rule gives each piece its full gas budget, one after the other. With big circuits that can pass the about 50M gas that public X Layer nodes allow in a free call. The order page then says it cannot run the rule, rather than show an answer it did not get.
+- Running a paid rule made of pieces gives each piece its full gas budget, one after the other (a top circuit is run once, after the contract confirms no piece circuit changed). With big circuits that can pass the about 50M gas that public X Layer nodes allow in a free call. The order page then says it cannot run the rule, rather than show an answer it did not get.
 
 **What a 16-input piece costs.** Measured on a copy of X Layer mainnet with a circuit built like the real 652-gate 8x8 multiplier: about **1.5M gas per case** ([evidence](evidence/2026-11-21-gas-16-input-piece.md)). From that measured figure, all 65,536 cases come to about 98B gas, about 1.97 OKB at that day's gas price of 0.02 gwei. That total is a projection, and the gas price moves. The crank then needs about 3,450 transactions, because each case must be handed its whole 9.88M gas budget. A small comparator of about 70 gates took 400 transactions in a local test run with stand-in circuits ([evidence](evidence/2026-11-21-crank-anvil-run.md)); its cost of about 0.22 OKB is an estimate, not a measurement of a real circuit.
 
@@ -59,13 +70,14 @@ Not yet tested: a contract calling a circuit chosen at claim time inside one tra
 
 ## Known limits
 
-- A table covers at most 6 inputs. Bigger rules use pieces: at most two, each either a table of up to 6 inputs or one of two formulas ("a is at least b", "a plus b") of up to 17 inputs. Longer chains of pieces and free wiring between them come after Dec 7.
+- A table covers at most 6 inputs. Bigger rules use pieces: up to 8 with listed wires (two without), each either a table of up to 6 inputs or one of two formulas ("a is at least b", "a plus b") of up to 17 inputs; an order has at most 64 inputs and 64 outputs. Wires cannot carry the constants 0 and 1. The order page shows wired orders but cannot create them yet.
 - Who can change the circuit runner: the processor factory is owned by a 3-of-5 multisig and is not sealed; the circuit beacon's owner is the zero address (read-only check, Nov 15 2026). We have not audited every upgrade path, so Lathe pins and inspects the exact processor before any order takes money.
 - Lathe takes a fee on each paid order. Rate not set.
 - Every order names its builder. Open orders, where any builder may deliver, come after Dec 7: an open order lets anyone mint a copy of the honest builder's circuit, or wrap it, and deliver first.
 - A processor that returns badly encoded data (from `eval`, `step`, `circuitInfo` or `netlist`) makes `check` revert instead of counting a wrong answer. A delivered order then cannot finish its check: it waits until one day after its deadline, and then the buyer gets a refund. Only TapeOut's factory owners, who can change the processor code, could cause this. A builder cannot: a builder only picks a circuit, not the code that runs it.
 
-- The contract is three contracts: `LatheOrders`, which holds the money, and two linked libraries it calls, `LatheChecks` (the rules checked when an order is created) and `LatheReads` (`run` and `runStep`). This keeps `LatheOrders` under the contract size limit. The libraries hold no money and cannot change an order on their own. A deploy sends all three ([DEPLOY.md](DEPLOY.md)).
+- The contract is four contracts: `LatheOrders`, which holds the money, and three linked libraries: `LatheChecks` (the rules checked when an order is created), `LatheReads` (`run`, `runStep` and the wiring) and `NetlistLib` (builds the top circuit's expected bytes). This keeps `LatheOrders` under the contract size limit (22,382 of 24,576 bytes). The libraries hold no money and cannot change an order on their own. A deploy sends all four ([DEPLOY.md](DEPLOY.md)).
+- A top circuit that references a circuit which itself references others: Lathe checks that the piece circuits are unchanged before every run, but not the circuits those reference. This is the same for a plain order delivered as such a circuit.
 
 ## Roadmap to Dec 7
 

@@ -6,6 +6,7 @@ import {LatheOrders} from "../src/LatheOrders.sol";
 import {MockFactory, MockProcessor} from "../test/mocks/MockProcessor.sol";
 import {MockUSDT} from "../test/mocks/MockUSDT.sol";
 import {FormulaProcessor} from "../test/mocks/FormulaProcessor.sol";
+import {RefProcessor} from "../test/mocks/RefProcessor.sol";
 
 /// @notice X Layer TESTNET (chain 1952) deploy. TapeOut and USDT do not exist on testnet
 /// (evidence/2026-11-20-preflight.md, section 5), so this deploys stand-ins:
@@ -24,8 +25,14 @@ import {FormulaProcessor} from "../test/mocks/FormulaProcessor.sol";
 ///       formula circuit 3 = the same GreaterOrEqual(3, 2), wrong in case 5 only (a = 5, b = 0: answers 0);
 ///       formula circuit 4 = GreaterOrEqual(6, 6): 12 inputs, 4,096 cases, too many to check inside one delivery,
 ///         so it is checked with scripts/crank.mjs (Smoke.s.sol prints the command);
+///       formula circuit 5 = GreaterOrEqual(2, 3): 5 inputs, 1 output (a 2-bit cap against a 3-bit sum), for the
+///         daily-cap-shaped orders with explicit wires;
+///   - RefProcessor (test/mocks/RefProcessor.sol), registered with the mock factory: it holds circuits made of REF
+///     records and really runs them (each REF calls eval on the referenced circuit), and reports netlist and
+///     circuitInfo like TapeOut. Smoke.s.sol mints the top circuits of "needs a top" orders on it;
 ///   - LatheOrders pointing at the mock factory and MockUSDT, fee 1% to the deployer. forge first deploys
-///     LatheOrders' two linked libraries, LatheChecks and LatheReads (see DEPLOY.md).
+///     LatheOrders' linked libraries: NetlistLib (the top-circuit encoder), then LatheChecks and LatheReads, which
+///     call it (see DEPLOY.md).
 /// This proves the order contract's own logic only. Real TapeOut circuits are proven by the fork tests.
 /// The mocks reuse test/mocks so there is one copy of them. Their setters have no access control: fine for a
 /// throwaway testnet, never for mainnet. Logs only the deployed addresses.
@@ -38,6 +45,7 @@ contract DeployTestnet is Script {
     uint256 public constant GE32_ID = 2;
     uint256 public constant GE32_WRONG_ID = 3;
     uint256 public constant GE66_ID = 4;
+    uint256 public constant GE23_ID = 5;
     uint256 public constant GE32_WRONG_CASE = 5;
     uint32 public constant FORMULA_GATES = 4;
     uint16 public constant TESTNET_FEE_BPS = 100;
@@ -96,6 +104,10 @@ contract DeployTestnet is Script {
         formula.setCircuit(GE32_WRONG_ID, deployer, false, 3, 2, FORMULA_GATES);
         formula.setWrongAt(GE32_WRONG_ID, GE32_WRONG_CASE);
         formula.setCircuit(GE66_ID, deployer, false, 6, 6, FORMULA_GATES);
+        formula.setCircuit(GE23_ID, deployer, false, 2, 3, FORMULA_GATES);
+
+        RefProcessor refProcessor = new RefProcessor();
+        factory.setCPU(address(refProcessor), true);
 
         LatheOrders lathe = new LatheOrders(address(factory), address(usdt), deployer, TESTNET_FEE_BPS);
         usdt.mint(deployer, MINT);
@@ -114,5 +126,7 @@ contract DeployTestnet is Script {
         console2.log("GE32_ID", GE32_ID);
         console2.log("GE32_WRONG_ID", GE32_WRONG_ID);
         console2.log("GE66_ID", GE66_ID);
+        console2.log("GE23_ID", GE23_ID);
+        console2.log("REF_PROCESSOR", address(refProcessor));
     }
 }

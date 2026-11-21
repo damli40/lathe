@@ -50,11 +50,13 @@ forge script script/DeployTestnet.s.sol \
 
 It refuses to run on any chain except 1952.
 
-**It sends two extra transactions first.** `LatheOrders` is too big to fit in one contract with the next versions' room, so two parts of it live in separate contracts called linked libraries: `LatheChecks` (the rules checked when an order is created) and `LatheReads` (`run`, `runStep` and the piece join for paid orders). Neither holds money or can change an order. `forge` deploys both before `LatheOrders` and writes their addresses into its code. It uses the standard CREATE2 deployer (`0x4e59b44847b379578588920ca78fbf26c0b4956c`, present on X Layer testnet and mainnet when checked on 2026-11-21), so a library's address depends only on its compiled code: the same code gets the same address on every chain, and any change to `src/` (even a comment, since it changes the compiled metadata) gives a new one. If a library is already at that address, `forge` skips it. The addresses are in `broadcast/DeployTestnet.s.sol/1952/run-latest.json` under `libraries`.
+**It sends three extra transactions first.** `LatheOrders` is too big to fit in one contract, so parts of it live in separate contracts called linked libraries: `LatheChecks` (the rules checked when an order is created), `LatheReads` (`run`, `runStep`, the piece join and the wiring for paid orders) and `NetlistLib` (builds the exact bytes a top circuit made of the tested pieces must have; `LatheChecks` and `LatheReads` both call it). None holds money or can change an order. `forge` deploys `NetlistLib` first, then the other two, then `LatheOrders`, and writes their addresses into the code that calls them. It uses the standard CREATE2 deployer (`0x4e59b44847b379578588920ca78fbf26c0b4956c`, present on X Layer testnet and mainnet when checked on 2026-11-21), so a library's address depends only on its compiled code: the same code gets the same address on every chain, and any change to `src/` (even a comment, since it changes the compiled metadata) gives a new one. If a library is already at that address, `forge` skips it. The addresses are in `broadcast/DeployTestnet.s.sol/1952/run-latest.json` under `libraries`.
 
-It prints: `LATHE`, `USDT`, `FACTORY`, `PROCESSOR`, `XOR_ID` (1), `WRONG_ID` (2), `TOGGLE_ID` (3), `WRONG_TOGGLE_ID` (4), `FORMULA_PROCESSOR`, `ADD22_ID` (1), `GE32_ID` (2), `GE32_WRONG_ID` (3), `GE66_ID` (4). Keep them.
+It prints: `LATHE`, `USDT`, `FACTORY`, `PROCESSOR`, `XOR_ID` (1), `WRONG_ID` (2), `TOGGLE_ID` (3), `WRONG_TOGGLE_ID` (4), `FORMULA_PROCESSOR`, `ADD22_ID` (1), `GE32_ID` (2), `GE32_WRONG_ID` (3), `GE66_ID` (4), `GE23_ID` (5), `REF_PROCESSOR`. Keep them.
 
-`FORMULA_PROCESSOR` is a second mock processor for pieced orders. Its circuits compute a formula instead of looking up a list of answers, all 4 gates: 1 = "a plus b" on two 2-bit numbers, 2 = "a is at least b" with a of 3 bits and b of 2, 3 = the same but wrong in case 5 (a = 5, b = 0), 4 = "a is at least b" on two 6-bit numbers (12 inputs, 4,096 cases, for the crank).
+`FORMULA_PROCESSOR` is a second mock processor for pieced orders. Its circuits compute a formula instead of looking up a list of answers, all 4 gates: 1 = "a plus b" on two 2-bit numbers, 2 = "a is at least b" with a of 3 bits and b of 2, 3 = the same but wrong in case 5 (a = 5, b = 0), 4 = "a is at least b" on two 6-bit numbers (12 inputs, 4,096 cases, for the crank), 5 = "a is at least b" with a of 2 bits and b of 3 (for the daily-cap-shaped orders).
+
+`REF_PROCESSOR` is a third mock processor. It holds circuits made only of references to other circuits (the "top circuit" of an order that needs one) and really runs them: each reference calls the referenced circuit. It reports `netlist` and `circuitInfo` the way TapeOut does, so `deliverTop` can compare the bytes. The smoke run mints its tops there.
 
 **Optional, verify the source on OKLink** (needs an OKLink API key). Add these flags to the command above. `read -s` keeps the key off the screen and out of history:
 
@@ -65,15 +67,18 @@ read -s OKLINK_KEY
 #   --etherscan-api-key $OKLINK_KEY
 ```
 
-Not tested end to end. If it fails, try `xlayer_testnet` in lowercase, or verify after the fact. `LatheOrders` must be verified with the two library addresses, and each library on its own:
+Not tested end to end. If it fails, try `xlayer_testnet` in lowercase, or verify after the fact. `LatheOrders` must be verified with the two library addresses it calls, `LatheChecks` and `LatheReads` with the `NetlistLib` address, and `NetlistLib` on its own:
 
 ```sh
 forge verify-contract <LATHE address> src/LatheOrders.sol:LatheOrders \
   --libraries src/LatheChecks.sol:LatheChecks:<LatheChecks address> \
   --libraries src/LatheReads.sol:LatheReads:<LatheReads address> \
   --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
-forge verify-contract <LatheChecks address> src/LatheChecks.sol:LatheChecks --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
-forge verify-contract <LatheReads address> src/LatheReads.sol:LatheReads --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
+forge verify-contract <LatheChecks address> src/LatheChecks.sol:LatheChecks \
+  --libraries src/NetlistLib.sol:NetlistLib:<NetlistLib address> --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
+forge verify-contract <LatheReads address> src/LatheReads.sol:LatheReads \
+  --libraries src/NetlistLib.sol:NetlistLib:<NetlistLib address> --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
+forge verify-contract <NetlistLib address> src/NetlistLib.sol:NetlistLib --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
 ```
 
 The constructor arguments of `LatheOrders` may also be needed (`--constructor-args $(cast abi-encode "constructor(address,address,address,uint16)" <factory> <usdt> <fee recipient> <fee bps>)`).
@@ -84,7 +89,7 @@ Paste the addresses from step 3 into this command:
 
 ```sh
 LATHE=0x... USDT=0x... PROCESSOR=0x... XOR_ID=1 WRONG_ID=2 TOGGLE_ID=3 WRONG_TOGGLE_ID=4 \
-FORMULA_PROCESSOR=0x... ADD22_ID=1 GE32_ID=2 GE32_WRONG_ID=3 GE66_ID=4 \
+FORMULA_PROCESSOR=0x... ADD22_ID=1 GE32_ID=2 GE32_WRONG_ID=3 GE66_ID=4 GE23_ID=5 REF_PROCESSOR=0x... \
 forge script script/Smoke.s.sol \
   --rpc-url https://testrpc.xlayer.tech/terigon \
   --account lathe-testnet --broadcast
@@ -104,8 +109,11 @@ What it does and what you should see:
 | (h) | Creates the same two-piece order, delivers circuit 1 as piece 0 (passed), then tries the wrong circuit 3 as piece 1 | `deliverPiece reverts WrongAnswer(5)` (simulated, not sent), piece 0 still `16/16`, piece 1 not delivered, `order id 7 status 0` |
 | (i) | Reads order 6: `piecesOf`, `receipts`, `ruleOf`, then `run` on all 64 inputs | receipt processor 0 (a two-piece order has no single circuit), fingerprint = `piecedHash`, `ruleOf` reverts `NoSingleCircuit`, every `run` answer = (x0x1 + x2x3) >= x4x5 with each number lowest bit first (inputs where bit order matters are named in the log) |
 | (j) | Creates a one-piece order "a is at least b" on two 6-bit numbers (12 inputs, 4,096 cases) and delivers circuit 4. That is too many cases to check inside the delivery, so it stays at 0/4096 | `order id 8 status 0` and a `node scripts/crank.mjs ... --order 8 ...` command to check it (see below) |
+| (k) | Creates a "daily cap" order on 2-bit numbers with explicit wires, paid as "Lathe joins": inputs x0 x1 = spent, x2 x3 = amount, x4 x5 = cap. Piece 0 adds spent and amount (formula circuit 1), piece 1 asks "is the cap at least that sum" (formula circuit 5, cap 2 bits, sum 3 bits). Both are checked inside `deliverPiece` | `order id 9 status 2` (Paid when piece 1 passes); `run` on all 64 inputs equals "cap >= spent + amount" (x = `0x25` gives 1, `0x27` gives 0) |
+| (l) | The same order, created as "needs a top circuit". Both pieces pass but it stays Open. The script reads `expectedTopNetlist(10)`, mints a circuit with those bytes (6 inputs, 1 output) on `REF_PROCESSOR`, and calls `deliverTop` | `order id 10 status 2`; `ruleOf(10)` names the top circuit on `REF_PROCESSOR`; `run(10, x)` (one run of the top circuit) equals `run(9, x)` on all 64 inputs |
+| (m) | A third "needs a top circuit" order with both pieces passed. Two bad tops are minted: the right bytes with the wrong shape (7 inputs), and wrong bytes (the comparator's five input wires rotated by one) | `deliverTop reverts ShapeMismatch` and `deliverTop reverts WrongTopCircuit` (both simulated, not sent); `order id 11 status 0` |
 
-Every transaction (orders 1 to 8 and their deliveries) is sent before the simulated wrong deliveries in (b), (e) and (h). A pranked call from your account uses up one of its nonces in forge's simulation, so a transaction queued after it went out with a nonce the chain skipped (seen on the local anvil run: "provider nonce is still behind expected nonce").
+Every transaction (orders 1 to 11, their deliveries and the three top circuits minted in (l) and (m)) is sent before the simulated wrong deliveries in (b), (e), (h) and (m). A pranked call from your account uses up one of its nonces in forge's simulation, so a transaction queued after it went out with a nonce the chain skipped (seen on the local anvil run: "provider nonce is still behind expected nonce").
 
 The (f) reads and the `run` / `runStep` calls are free reads that forge runs in its simulation of the same transactions; they are never sent. `run` and `runStep` get an explicit 1,000,000 gas: like `check`, they refuse (`InsufficientGasForCase`) unless they can give the circuit its whole per-case budget. To confirm on chain afterwards:
 
@@ -138,7 +146,9 @@ node scripts/crank.mjs --lathe <LATHE> --order 8 --piece 0 --batch 1000 \
 
 `--password-file` is a file only you can read (`chmod 600`) holding the keystore password; delete it after the run. Without it cast asks for the password on every transaction (about 5 here). Add `--dry` first to see the plan and the worst-case cost without sending anything. On the local anvil run the crank lowered the batch to 940 cases (gas limit 199,970,820 under the 200M default), sent 5 transactions, and the last one paid order 8. Expect `order 8 paid`.
 
-All ten steps must behave as described before mainnet.
+All thirteen steps must behave as described before mainnet.
+
+With the wired steps (k) to (m) (2026-11-21, local anvil, chain id 1952, block gas limit 210M, anvil's unlocked default account): `ONCHAIN EXECUTION COMPLETE & SUCCESSFUL`; read back from the chain afterwards, orders 9 and 10 were Paid and order 11 Open, and `ruleOf(10)` named circuit 1 on `REF_PROCESSOR`. The deploy broadcast held the three library deploys (CREATE2) before the mocks and `LatheOrders`. Not yet run on testnet.
 
 With the pieced steps (g) to (j) (2026-11-21, local anvil, chain id 1952, block gas limit 210M): order 6 Paid, order 7 Open with piece 0 at 16/16 and piece 1 not delivered, order 8 Open at 0/4096, `run(6, 0x01)` = `0x01`, `run(6, 0x20)` = `0x00`, `run(6, 0x13)` = `0x01` by `cast call --gas-limit 2000000`, and the printed crank command (with `--rpc` pointed at the anvil and `--unlocked --from` instead of a keystore) checked order 8 to Paid in 5 transactions.
 
@@ -154,7 +164,7 @@ Use a **separate** keystore for mainnet, never the testnet one:
 cast wallet import lathe-mainnet --interactive
 ```
 
-Fund it with a little real OKB on X Layer for gas. The deploy is **three transactions**: `LatheChecks`, `LatheReads` (the two linked libraries, see step 3), then `LatheOrders`. Forge's estimate for all three on the 2026-11-21 mainnet-fork dry run was 8,164,147 gas, about 0.00033 OKB at that run's gas price (forge's estimate includes its 1.3x margin; the real use is lower).
+Fund it with a little real OKB on X Layer for gas. The deploy is **four transactions**: `NetlistLib`, `LatheChecks`, `LatheReads` (the three linked libraries, see step 3), then `LatheOrders`. Forge's estimate for all four on the 2026-11-21 mainnet-fork dry run (V3b and V4 code) was 12,023,700 gas, about 0.00048 OKB at that run's gas price (forge's estimate includes its 1.3x margin; the real use is lower).
 
 Decide two values first. Both are fixed forever once deployed (no owner, no upgrade):
 
@@ -183,7 +193,7 @@ forge script script/Deploy.s.sol \
   --etherscan-api-key $OKLINK_KEY
 ```
 
-`--verify` also verifies the two libraries, because they are deployed by the same run (not tested; if one is missing on OKLink, use the three `forge verify-contract` commands in step 3 with the `XLAYER` URL). The library addresses are in `broadcast/Deploy.s.sol/196/run-latest.json` under `libraries`; record them with the `LatheOrders` address.
+`--verify` also verifies the three libraries, because they are deployed by the same run (not tested; if one is missing on OKLink, use the four `forge verify-contract` commands in step 3 with the `XLAYER` URL). The library addresses are in `broadcast/Deploy.s.sol/196/run-latest.json` under `libraries`; record them with the `LatheOrders` address.
 
 The script refuses to run unless the chain is 196, the factory and USDT have code, USDT has 6 decimals, `FEE_RECIPIENT` is not zero and `FEE_BPS` is at most 500. It prints one line: `LatheOrders 0x...`. Record that address, the two library addresses and the three transaction hashes (from `broadcast/Deploy.s.sol/196/run-latest.json`) in `evidence/2026-11-2x-deploy-v0.md`.
 

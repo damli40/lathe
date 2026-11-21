@@ -84,8 +84,18 @@ Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mon
     or check box; the page says pieces are delivered with `deliverPiece` and checked with `checkPiece` (the crank
     script, `scripts/README.md`). The refund box follows `refund()` for pieced orders: only while Open, right after
     the deadline while some piece has no delivery, otherwise one day after the deadline.
+  - Wired orders (V4, `createPiecedOrder` with a `PiecedSpec`, up to 8 pieces): the view reads `wiresOf` and
+    `needsTop` (a contract without them reads as the fixed join and "Lathe joins"). It shows how many pieces have
+    passed ("2 of 3 pieces passed"), and, when the wires are not the fixed join, lists them in plain words, one line
+    per run of wires ("Piece 2 inputs 2 to 4 come from piece 1 outputs 0 to 2"). An order that needs a top circuit
+    gets a "Top circuit" box: waiting for the pieces, waiting for `deliverTop` (until one day after the deadline), or
+    the delivered top (`deliveries(N)`). The page does not create wired orders; `examples/daily-cap.json` is made
+    with cast or a script.
   - `?receipt=N` checks the fingerprint the same way the contract makes it, `keccak256(abi.encode(pieces, tables))`,
-    against both the receipt and `piecedHash(N)`, and lists each piece's circuit. A 2-piece order has no single
+    against both the receipt and `piecedHash(N)` (with `wiresOf` added, `keccak256(abi.encode(pieces, tables,
+    wires))`, for a wired order; since `wiresOf` shows the fixed join for an order made without wires, both forms
+    are tried), and lists each piece's circuit. A "needs a top" order names its top circuit and is checked with
+    `ruleOf`; its "Try the rule" holds gas for every piece plus the top. A 2-piece order without a top has no single
     circuit: the page says so, never shows the receipt's zero processor, and does not call `ruleOf` (it reverts
     `NoSingleCircuit` by design). A 1-piece order names its circuit and is checked with `ruleOf` like a V0 order.
     "Try the rule" calls `run` with gas for every piece's netlist read and full hold, times 64/63 for the library
@@ -148,11 +158,16 @@ node web/test/receipt.mjs
 #    run on inputs where bit order matters; a piece mid-check (100 of 4,096) past its deadline with every piece
 #    delivered (refund waits for the grace day); a rejected piece (shown as not delivered); a piece never delivered
 #    past the deadline (refund open); a paid 1-piece order (ruleOf, run); a paid order of 1,600-gate pieces (the page
-#    says it cannot run it). Checks that no V0 text appears: table mismatch, zero address, "no delivery", deliver box
+#    says it cannot run it); a paid 3-piece wired order (wires in plain words, wired fingerprint, run); a "needs a
+#    top" order with its top minted on the mock REF processor and delivered (receipt names the top, ruleOf, run);
+#    the same waiting for the top and waiting for a piece; Chinese wire text. Checks that no V0 text appears:
+#    table mismatch, zero address, "no delivery", deliver box
 node web/test/pieces.mjs
 ```
 
-`node --test web/test/` also runs `pieces.test.mjs`: the join and piece answers, and the pieced refund rule.
+`node --test web/test/` also runs `pieces.test.mjs`: the join and piece answers, the wired rule (the fixed join as
+wires, and `examples/daily-cap.json` against "cap >= spent + amount"), the plain-words wire runs, and the pieced
+refund rule.
 
 The browser tests turn off the page's CSP (`bypassCSP`) only so the testnet or mainnet entry can point at
 `127.0.0.1`; `readonly.mjs` and `shots.mjs` run with the real CSP. Forge output for the tests goes to a temp folder,

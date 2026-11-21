@@ -34,12 +34,12 @@ function forgeEnv() {
   return { ...process.env, FOUNDRY_BROADCAST: join(tmp, "broadcast"), FOUNDRY_CACHE_PATH: join(tmp, "cache"), FOUNDRY_OUT: join(tmp, "out") };
 }
 
-/** Run DeployTestnet.s.sol against the anvil; returns { lathe, token, factory, processor, formula }. */
+/** Run DeployTestnet.s.sol against the anvil; returns { lathe, token, factory, processor, formula, ref }. */
 export function deployMocks(url) {
   const out = execFileSync("forge", ["script", "script/DeployTestnet.s.sol", "--rpc-url", url, "--broadcast", "--unlocked", "--sender", ANVIL_ACCOUNT0], { cwd: REPO, env: forgeEnv(), encoding: "utf8", maxBuffer: 1 << 24 });
   // Whole names only: "PROCESSOR" must not match the "FORMULA_PROCESSOR" line.
   const grab = (k) => out.match(new RegExp(`(?:^|\\s)${k}\\s+(0x[0-9a-fA-F]{40})`))?.[1];
-  const r = { lathe: grab("LATHE"), token: grab("USDT"), factory: grab("FACTORY"), processor: grab("PROCESSOR"), formula: grab("FORMULA_PROCESSOR") };
+  const r = { lathe: grab("LATHE"), token: grab("USDT"), factory: grab("FACTORY"), processor: grab("PROCESSOR"), formula: grab("FORMULA_PROCESSOR"), ref: grab("REF_PROCESSOR") };
   if (!r.lathe || !r.token || !r.processor) throw new Error("could not read deploy output:\n" + out);
   return r;
 }

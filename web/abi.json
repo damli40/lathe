@@ -419,6 +419,121 @@
  },
  {
   "type": "function",
+  "name": "createPiecedOrder",
+  "inputs": [
+   {
+    "name": "spec",
+    "type": "tuple",
+    "internalType": "struct LatheOrders.PiecedSpec",
+    "components": [
+     {
+      "name": "pieces",
+      "type": "tuple[]",
+      "internalType": "struct Piece[]",
+      "components": [
+       {
+        "name": "kind",
+        "type": "uint8",
+        "internalType": "enum PieceKind"
+       },
+       {
+        "name": "nIn",
+        "type": "uint8",
+        "internalType": "uint8"
+       },
+       {
+        "name": "nOut",
+        "type": "uint8",
+        "internalType": "uint8"
+       },
+       {
+        "name": "widthA",
+        "type": "uint8",
+        "internalType": "uint8"
+       },
+       {
+        "name": "widthB",
+        "type": "uint8",
+        "internalType": "uint8"
+       }
+      ]
+     },
+     {
+      "name": "tables",
+      "type": "bytes[]",
+      "internalType": "bytes[]"
+     },
+     {
+      "name": "maxGates",
+      "type": "uint32[]",
+      "internalType": "uint32[]"
+     },
+     {
+      "name": "labels",
+      "type": "bytes32[]",
+      "internalType": "bytes32[]"
+     },
+     {
+      "name": "wires",
+      "type": "tuple[]",
+      "internalType": "struct Wire[]",
+      "components": [
+       {
+        "name": "fromPiece",
+        "type": "uint8",
+        "internalType": "uint8"
+       },
+       {
+        "name": "fromBit",
+        "type": "uint8",
+        "internalType": "uint8"
+       },
+       {
+        "name": "toPiece",
+        "type": "uint8",
+        "internalType": "uint8"
+       },
+       {
+        "name": "toBit",
+        "type": "uint8",
+        "internalType": "uint8"
+       }
+      ]
+     },
+     {
+      "name": "needsTop",
+      "type": "bool",
+      "internalType": "bool"
+     }
+    ]
+   },
+   {
+    "name": "amount",
+    "type": "uint96",
+    "internalType": "uint96"
+   },
+   {
+    "name": "deadline",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "builder",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
   "name": "createStatefulOrder",
   "inputs": [
    {
@@ -583,6 +698,29 @@
  },
  {
   "type": "function",
+  "name": "deliverTop",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "processor",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
   "name": "deliveries",
   "inputs": [
    {
@@ -643,6 +781,25 @@
    }
   ],
   "stateMutability": "pure"
+ },
+ {
+  "type": "function",
+  "name": "expectedTopNetlist",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "stateMutability": "view"
  },
  {
   "type": "function",
@@ -711,6 +868,25 @@
     "name": "",
     "type": "bytes32[]",
     "internalType": "bytes32[]"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "needsTop",
+  "inputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bool",
+    "internalType": "bool"
    }
   ],
   "stateMutability": "view"
@@ -1111,6 +1287,47 @@
   "stateMutability": "view"
  },
  {
+  "type": "function",
+  "name": "wiresOf",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple[]",
+    "internalType": "struct Wire[]",
+    "components": [
+     {
+      "name": "fromPiece",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "fromBit",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "toPiece",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "toBit",
+      "type": "uint8",
+      "internalType": "uint8"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
   "type": "event",
   "name": "Delivered",
   "inputs": [
@@ -1389,6 +1606,11 @@
  },
  {
   "type": "error",
+  "name": "BadWire",
+  "inputs": []
+ },
+ {
+  "type": "error",
   "name": "BuilderRequired",
   "inputs": []
  },
@@ -1409,12 +1631,22 @@
  },
  {
   "type": "error",
+  "name": "FedTwice",
+  "inputs": []
+ },
+ {
+  "type": "error",
   "name": "FeeTooHigh",
   "inputs": []
  },
  {
   "type": "error",
   "name": "GraceOver",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "InputUnconnected",
   "inputs": []
  },
  {
@@ -1474,7 +1706,17 @@
  },
  {
   "type": "error",
+  "name": "OutputUnconnected",
+  "inputs": []
+ },
+ {
+  "type": "error",
   "name": "PieceAlreadyPassed",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "PiecesNotPassed",
   "inputs": []
  },
  {
@@ -1535,7 +1777,22 @@
  },
  {
   "type": "error",
+  "name": "TopInputUnused",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "TopNeedsLastOutputs",
+  "inputs": []
+ },
+ {
+  "type": "error",
   "name": "UnsupportedStateBits",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "WiringNotForward",
   "inputs": []
  },
  {
@@ -1562,6 +1819,11 @@
  {
   "type": "error",
   "name": "WrongTableLength",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "WrongTopCircuit",
   "inputs": []
  },
  {

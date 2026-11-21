@@ -9,6 +9,9 @@
 // - Table pieces: answer = the piece's table bits for case c (TableLib, no memory);
 // - two pieces A, B: A gets x's low A.nIn bits; B gets A's answer in its low A.nOut input bits and x >> A.nIn above:
 //   B.in = outA | ((x >> A.nIn) << A.nOut). The order answers B's outputs.
+// - wired orders (createPiecedOrder with a PiecedSpec, 1 to 8 pieces): wiresOf(id) lists every wire in the stored
+//   order (piece 0's inputs 0, 1, .., then piece 1's, .., then the order's outputs); fromPiece / toPiece 255 = the
+//   order itself. The pieces run in index order, each on the bits its wires name (LatheReads._runChain).
 
 export const KIND = { Table: 0, GreaterOrEqual: 1, Add: 2 };
 
@@ -67,4 +70,78 @@ export function joinExpected(pieces, tables, x) {
 export function pieceState(p, d) {
   if (!d || /^0x0{40}$/i.test(d.processor)) return "none";
   return BigInt(d.nextCase) >= 1n << BigInt(p.nIn) ? "passed" : "checking";
+}
+
+/** The piece index that stands for "the order itself" in a wire (NetlistLib.WIRE_TOP). */
+export const WIRE_TOP = 255;
+
+/** A wire from wiresOf as plain numbers. */
+export function normWire(w) {
+  return { fromPiece: Number(w.fromPiece), fromBit: Number(w.fromBit), toPiece: Number(w.toPiece), toBit: Number(w.toBit) };
+}
+
+/**
+ * The wired rule's expected answer for order input x, the same way LatheReads._runChain computes it: pieces in index
+ * order, piece k's input j = the bit its wire names (an order input bit, or a bit of an earlier piece's answer).
+ * `wires` must be in the stored order (wiresOf). nOut = the order's output count.
+ */
+export function chainExpected(pieces, tables, wires, nOut, x) {
+  const X = BigInt(x);
+  const ws = wires.map(normWire);
+  const outs = [];
+  const bit = (e) => (((e.fromPiece === WIRE_TOP ? X : outs[e.fromPiece]) >> BigInt(e.fromBit)) & 1n);
+  let w = 0;
+  pieces.forEach((p, k) => {
+    let xin = 0n;
+    for (let j = 0; j < p.nIn; j++) xin |= bit(ws[w++]) << BigInt(j);
+    outs[k] = pieceExpected(p, xin, tables[k]);
+  });
+  let y = 0n;
+  for (let j = 0; j < nOut; j++) y |= bit(ws[w + j]) << BigInt(j);
+  return y;
+}
+
+/**
+ * The wires grouped into runs for plain-words display: consecutive pins of one sink fed by consecutive bits of one
+ * source. Each run: { to (piece index, or WIRE_TOP for the order's outputs), toFirst, toLast, from (piece index, or
+ * WIRE_TOP for the order's inputs), fromFirst, fromLast }. Runs keep the stored order (piece 0 first, outputs last).
+ */
+export function wireRuns(wires) {
+  const runs = [];
+  for (const e of wires.map(normWire)) {
+    const r = runs[runs.length - 1];
+    if (r && r.to === e.toPiece && r.from === e.fromPiece && e.toBit === r.toLast + 1 && e.fromBit === r.fromLast + 1) {
+      r.toLast = e.toBit;
+      r.fromLast = e.fromBit;
+    } else {
+      runs.push({ to: e.toPiece, toFirst: e.toBit, toLast: e.toBit, from: e.fromPiece, fromFirst: e.fromBit, fromLast: e.fromBit });
+    }
+  }
+  return runs;
+}
+
+/**
+ * The wires of an order made without explicit wires (1 or 2 pieces), as LatheReads.wiresOf returns them: the fixed
+ * join written out. An order whose wiresOf equals this is shown with the join text; any other with the wire list.
+ */
+export function defaultWires(pieces) {
+  const a = pieces[0];
+  const b = pieces[pieces.length - 1];
+  const out = [];
+  for (let j = 0; j < a.nIn; j++) out.push({ fromPiece: WIRE_TOP, fromBit: j, toPiece: 0, toBit: j });
+  if (pieces.length === 2) {
+    for (let j = 0; j < b.nIn; j++) out.push(j < a.nOut ? { fromPiece: 0, fromBit: j, toPiece: 1, toBit: j } : { fromPiece: WIRE_TOP, fromBit: a.nIn + j - a.nOut, toPiece: 1, toBit: j });
+  }
+  for (let j = 0; j < b.nOut; j++) out.push({ fromPiece: pieces.length - 1, fromBit: j, toPiece: WIRE_TOP, toBit: j });
+  return out;
+}
+
+/** True when two wire lists are the same wires in the same order. */
+export function sameWires(a, b) {
+  if (a.length !== b.length) return false;
+  return a.every((w, i) => {
+    const x = normWire(w);
+    const y = normWire(b[i]);
+    return x.fromPiece === y.fromPiece && x.fromBit === y.fromBit && x.toPiece === y.toPiece && x.toBit === y.toBit;
+  });
 }

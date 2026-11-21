@@ -2,7 +2,8 @@
 // vectors worked out from src/FormulaLib.sol and LatheOrders.createPiecedOrder / refund.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { KIND, pieceExpected, joinExpected, topInputs, packBig, readBitsBig, pieceState } from "../pieces.js";
+import { KIND, pieceExpected, joinExpected, topInputs, packBig, readBitsBig, pieceState, chainExpected, wireRuns, WIRE_TOP, defaultWires, sameWires } from "../pieces.js";
+import { readFileSync } from "node:fs";
 import { refundOpensAtPieced } from "../gas.js";
 
 const ge = (wa, wb) => ({ kind: KIND.GreaterOrEqual, nIn: wa + wb, nOut: 1, widthA: wa, widthB: wb });
@@ -60,4 +61,35 @@ test("pieced refund: right after the deadline while a piece has no delivery, els
   assert.equal(refundOpensAtPieced(0, 1000n, 86400n, true), 87401n);
   assert.equal(refundOpensAtPieced(2, 1000n, 86400n, false), null);
   assert.equal(refundOpensAtPieced(3, 1000n, 86400n, true), null);
+});
+
+test("wired rule: the join written as wires answers like joinExpected on every input", () => {
+  const ps = [{ kind: KIND.Add, nIn: 4, nOut: 3, widthA: 2, widthB: 2 }, { kind: KIND.GreaterOrEqual, nIn: 5, nOut: 1, widthA: 3, widthB: 2 }];
+  const ws = defaultWires(ps);
+  assert.ok(sameWires(ws, ws.map((w) => ({ ...w }))) && !sameWires(ws, ws.slice(1)));
+  for (let x = 0; x < 64; x++) assert.equal(chainExpected(ps, [null, null], ws, 1, x), joinExpected(ps, [null, null], x), "x=" + x);
+});
+
+test("wired rule: examples/daily-cap.json answers cap >= spent + amount", () => {
+  const j = JSON.parse(readFileSync(new URL("../../examples/daily-cap.json", import.meta.url), "utf8"));
+  const run = (spent, amount, cap) => chainExpected(j.pieces, [null, null], j.wires, 1, BigInt(spent) | (BigInt(amount) << 8n) | (BigInt(cap) << 16n));
+  assert.equal(run(100, 50, 200), 1n);
+  assert.equal(run(100, 150, 200), 0n);
+  assert.equal(run(100, 100, 200), 1n);
+  assert.equal(run(255, 255, 255), 0n);
+  assert.equal(run(0, 0, 0), 1n);
+  for (let k = 0; k < 2000; k++) {
+    const s = (k * 37) & 255, a = (k * 101) & 255, c = (k * 13 + 7) & 255;
+    assert.equal(run(s, a, c), c >= s + a ? 1n : 0n, `${s} ${a} ${c}`);
+  }
+});
+
+test("wire runs: consecutive pins from consecutive bits join into one run", () => {
+  const j = JSON.parse(readFileSync(new URL("../../examples/daily-cap.json", import.meta.url), "utf8"));
+  assert.deepEqual(wireRuns(j.wires), [
+    { to: 0, toFirst: 0, toLast: 15, from: WIRE_TOP, fromFirst: 0, fromLast: 15 },
+    { to: 1, toFirst: 0, toLast: 7, from: WIRE_TOP, fromFirst: 16, fromLast: 23 },
+    { to: 1, toFirst: 8, toLast: 16, from: 0, fromFirst: 0, fromLast: 8 },
+    { to: WIRE_TOP, toFirst: 0, toLast: 0, from: 1, fromFirst: 0, fromLast: 0 },
+  ]);
 });

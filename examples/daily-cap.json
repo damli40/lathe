@@ -1,0 +1,292 @@
+{
+  "name": "daily-cap",
+  "summary": "Allowed when spent today + this amount is at most the daily cap. Two pieces: an 8-bit adder, then a 9-bit comparison against the 8-bit cap.",
+  "layout": "Lowest bit first everywhere. Order inputs: bits 0-7 = spent, bits 8-15 = amount, bits 16-23 = cap (24 inputs, 3 input bytes in that order). Piece 0 = Add(8, 8): a = spent, b = amount, 9 output bits (the sum, bit 8 is the carry). Piece 1 = GreaterOrEqual(8, 9): a = cap (piece inputs 0-7), b = the 9-bit sum (piece inputs 8-16), 1 output. Order output 0 = piece 1's answer = allowed (cap >= spent + amount). The sum keeps all 9 bits, so 255 + 255 = 510 is never read as 254.",
+  "inputs": [
+    {
+      "name": "spent",
+      "from": 0,
+      "bits": 8
+    },
+    {
+      "name": "amount",
+      "from": 8,
+      "bits": 8
+    },
+    {
+      "name": "cap",
+      "from": 16,
+      "bits": 8
+    }
+  ],
+  "outputs": [
+    {
+      "name": "allowed",
+      "bit": 0
+    }
+  ],
+  "pieces": [
+    {
+      "kind": 2,
+      "nIn": 16,
+      "nOut": 9,
+      "widthA": 8,
+      "widthB": 8
+    },
+    {
+      "kind": 1,
+      "nIn": 17,
+      "nOut": 1,
+      "widthA": 8,
+      "widthB": 9
+    }
+  ],
+  "tables": [
+    "0x",
+    "0x"
+  ],
+  "maxGates": [
+    0,
+    0
+  ],
+  "labels": [],
+  "wires": [
+    {
+      "fromPiece": 255,
+      "fromBit": 0,
+      "toPiece": 0,
+      "toBit": 0
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 1,
+      "toPiece": 0,
+      "toBit": 1
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 2,
+      "toPiece": 0,
+      "toBit": 2
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 3,
+      "toPiece": 0,
+      "toBit": 3
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 4,
+      "toPiece": 0,
+      "toBit": 4
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 5,
+      "toPiece": 0,
+      "toBit": 5
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 6,
+      "toPiece": 0,
+      "toBit": 6
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 7,
+      "toPiece": 0,
+      "toBit": 7
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 8,
+      "toPiece": 0,
+      "toBit": 8
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 9,
+      "toPiece": 0,
+      "toBit": 9
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 10,
+      "toPiece": 0,
+      "toBit": 10
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 11,
+      "toPiece": 0,
+      "toBit": 11
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 12,
+      "toPiece": 0,
+      "toBit": 12
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 13,
+      "toPiece": 0,
+      "toBit": 13
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 14,
+      "toPiece": 0,
+      "toBit": 14
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 15,
+      "toPiece": 0,
+      "toBit": 15
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 16,
+      "toPiece": 1,
+      "toBit": 0
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 17,
+      "toPiece": 1,
+      "toBit": 1
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 18,
+      "toPiece": 1,
+      "toBit": 2
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 19,
+      "toPiece": 1,
+      "toBit": 3
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 20,
+      "toPiece": 1,
+      "toBit": 4
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 21,
+      "toPiece": 1,
+      "toBit": 5
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 22,
+      "toPiece": 1,
+      "toBit": 6
+    },
+    {
+      "fromPiece": 255,
+      "fromBit": 23,
+      "toPiece": 1,
+      "toBit": 7
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 0,
+      "toPiece": 1,
+      "toBit": 8
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 1,
+      "toPiece": 1,
+      "toBit": 9
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 2,
+      "toPiece": 1,
+      "toBit": 10
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 3,
+      "toPiece": 1,
+      "toBit": 11
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 4,
+      "toPiece": 1,
+      "toBit": 12
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 5,
+      "toPiece": 1,
+      "toBit": 13
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 6,
+      "toPiece": 1,
+      "toBit": 14
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 7,
+      "toPiece": 1,
+      "toBit": 15
+    },
+    {
+      "fromPiece": 0,
+      "fromBit": 8,
+      "toPiece": 1,
+      "toBit": 16
+    },
+    {
+      "fromPiece": 1,
+      "fromBit": 0,
+      "toPiece": 255,
+      "toBit": 0
+    }
+  ],
+  "needsTop": true,
+  "checks": [
+    {
+      "spent": 100,
+      "amount": 50,
+      "cap": 200,
+      "allowed": 1
+    },
+    {
+      "spent": 100,
+      "amount": 150,
+      "cap": 200,
+      "allowed": 0
+    },
+    {
+      "spent": 100,
+      "amount": 100,
+      "cap": 200,
+      "allowed": 1
+    },
+    {
+      "spent": 255,
+      "amount": 255,
+      "cap": 255,
+      "allowed": 0
+    },
+    {
+      "spent": 0,
+      "amount": 0,
+      "cap": 0,
+      "allowed": 1
+    }
+  ]
+}

@@ -1525,13 +1525,15 @@ async function loadOrder(id, keep = {}) {
       }
       data.pieces = await readPieces(L, A, id);
       const pieced = data.pieces.length > 0;
+      if (pieced) Object.assign(data, await readWiring(L, A, id, data.pieces));
       if (state.view.mode === "receipt" && data.order.status === 2) {
         const r = await read(L, A, "receipts", [id]);
         data.receipt = { processor: r[0], circuitId: r[1], tableHash: r[2], blockNumber: r[3] };
         if (pieced) data.piecedHash = await read(L, A, "piecedHash", [id]);
       }
-      // A 2-piece order has no single circuit, so ruleOf is not asked (it would revert NoSingleCircuit by design).
-      if (state.view.mode === "receipt" && data.order.status === 2 && data.pieces.length <= 1) {
+      // An order of 2 or more pieces without a top circuit has no single circuit, so ruleOf is not asked (it would
+      // revert NoSingleCircuit by design). A "needs a top" order's rule is its top circuit.
+      if (state.view.mode === "receipt" && data.order.status === 2 && (data.pieces.length <= 1 || data.needsTop)) {
         try {
           const rule = await read(L, A, "ruleOf", [id]);
           data.rule = { processor: rule[0], circuitId: rule[1] };
@@ -1578,6 +1580,23 @@ async function readPieces(L, A, id) {
       maxGates: Number(per[3 * i + 2]),
     };
   });
+}
+
+// A pieced order's wires (wiresOf) and kind (needsTop). A contract from before V4 has neither: its orders are the
+// fixed join (P.defaultWires) and pay when the last piece passes. As in readPieces, a network failure is thrown.
+async function readWiring(L, A, id, pieces) {
+  const tryRead = async (fn, fallback) => {
+    try {
+      return await read(L, A, fn, [id]);
+    } catch (e) {
+      if (explain(e, { read: true }).name === "network") throw e;
+      return fallback;
+    }
+  };
+  const raw = await tryRead("wiresOf", null);
+  const wires = raw ? raw.map(P.normWire) : P.defaultWires(pieces);
+  const needsTop = (await tryRead("needsTop", false)) === true;
+  return { wires, needsTop, joined: P.sameWires(wires, P.defaultWires(pieces)) };
 }
 
 /** When refund opens for this order (unix seconds, BigInt) or null: the pieced rule for a pieced order. */
@@ -2134,12 +2153,55 @@ function pieceBox(p, i) {
   return box;
 }
 
-function piecedIntro(pieces) {
+// "x0" or "x0 to x7": one bit or a run of bits, with the order's x / y names when given.
+function bitsText(first, last, name = "") {
+  return first === last ? name + first : txt("tool.pieces.range", { a: name + first, b: name + last });
+}
+
+// One line per run of wires, in plain words: which piece (or the order) feeds which. Pieces count from 1 on the
+// page, bits from 0 (as everywhere else).
+function wireLines(wires) {
+  return P.wireRuns(wires).map((r) => {
+    const out = r.to === P.WIRE_TOP;
+    const fromTop = r.from === P.WIRE_TOP;
+    const vars = { to: r.to + 1, from: r.from + 1, pins: bitsText(r.toFirst, r.toLast, out ? "y" : ""), src: bitsText(r.fromFirst, r.fromLast, fromTop ? "x" : "") };
+    const key = out ? "wireOut" : fromTop ? "wireFromInput" : "wireFromPiece";
+    return txt("tool.pieces." + key + (r.toFirst === r.toLast ? "1" : ""), vars);
+  });
+}
+
+function piecedIntro(pieces, data) {
   const n = pieces.length;
-  return el("div", { class: "box", id: "pieces-intro" },
-    el("p", { id: "pieces-made-of", text: n === 1 ? txt("tool.pieces.madeOf1") : txt("tool.pieces.madeOfN", { n }) }),
-    n === 2 ? el("p", { class: "help", id: "pieces-join", text: joinText(pieces) }) : null,
-    n === 2 ? el("p", { class: "help", text: txt("tool.pieces.joinWhy") }) : null);
+  const top = !!data?.needsTop;
+  const joined = data ? data.joined : true;
+  const passed = pieces.filter((p) => P.pieceState(p, p.delivery) === "passed").length;
+  const made = top ? txt("tool.pieces.madeOfNTop", { n }) : n === 1 ? txt("tool.pieces.madeOf1") : txt("tool.pieces.madeOfN", { n });
+  const box = el("div", { class: "box", id: "pieces-intro" },
+    el("p", { id: "pieces-made-of", text: made }),
+    el("p", { class: "help", id: "pieces-progress", text: txt("tool.pieces.progress", { done: passed, n }) }));
+  if (n === 2 && joined) {
+    box.append(el("p", { class: "help", id: "pieces-join", text: joinText(pieces) }), el("p", { class: "help", text: txt("tool.pieces.joinWhy") }));
+  } else if (!joined) {
+    box.append(el("p", { class: "help", text: txt("tool.pieces.wiresHeading") }),
+      el("ul", { class: "help", id: "pieces-wires" }, ...wireLines(data.wires).map((t) => el("li", { text: t }))),
+      el("p", { class: "help", text: txt("tool.pieces.wiresWhy") }));
+  }
+  return box;
+}
+
+// Whether the order needs a top circuit, and where that stands. deliveries(id) holds the top once delivered.
+function topBox(o, pieces, data, now) {
+  const allPassed = pieces.every((p) => P.pieceState(p, p.delivery) === "passed");
+  const d = data.delivery;
+  const delivered = d && !/^0x0{40}$/i.test(d.processor);
+  let st;
+  if (delivered) st = txt("tool.pieces.topDelivered", { id: d.circuitId.toString(), proc: d.processor, gates: fmtInt(d.gateCount) });
+  else if (o.status !== 0) st = txt("tool.pieces.topNone");
+  else if (!allPassed) st = txt("tool.pieces.topWaitPieces");
+  else st = txt("tool.pieces.topWaitTop", { time: fmtDate(o.deadline + info().grace) });
+  return el("div", { class: "box", id: "top-box" }, el("h4", { text: txt("tool.pieces.topHeading") }),
+    el("p", { class: "help", text: txt("tool.pieces.topNeeded") }),
+    el("p", { id: "top-state", "data-state": delivered ? "delivered" : allPassed ? "waiting" : "pieces", text: st }));
 }
 
 function renderPiecedOrder(box, v, data) {
@@ -2153,7 +2215,7 @@ function renderPiecedOrder(box, v, data) {
     el("span", { class: "badge s-" + o.status, id: "order-status", text: txt("tool.order.status." + o.status) }),
     el("button", { type: "button", class: "btn btn-quiet btn-sm", text: txt("tool.order.refresh"), on: { click: () => loadOrder(v.id) } }),
     o.status === 2 ? el("button", { type: "button", class: "btn btn-ghost btn-sm", id: "receipt-btn", text: txt("tool.receipt.view"), on: { click: () => openOrder(v.id, "receipt") } }) : null,
-    el("p", { class: "help", text: o.status === 0 ? txt("tool.pieces.statusHelp0") : txt("tool.order.statusHelp." + o.status) }),
+    el("p", { class: "help", text: o.status === 0 ? txt(data.needsTop ? "tool.pieces.statusHelp0Top" : "tool.pieces.statusHelp0") : txt("tool.order.statusHelp." + o.status) }),
     v.lastAction ? el("p", { class: "msg " + (v.lastAction.err ? "is-err" : "is-ok"), role: "status", id: "last-action", text: txt(v.lastAction.key, v.lastAction.vars) }) : null);
   const now = chainNow(data);
   const payout = i.feeBps > 0 ? txt("tool.payout", { net: fmtAmount(G.payoutAfterFee(o.amount, i.feeBps)), symbol: i.symbol, pct: G.feePercent(i.feeBps) }) : null;
@@ -2165,7 +2227,7 @@ function renderPiecedOrder(box, v, data) {
     fact("tool.order.buyer", el("span", { class: "mono", text: o.buyer + you(o.buyer) }), true),
     fact("tool.order.builder", el("span", { class: "mono", text: o.builder + you(o.builder) }), true),
     fact("tool.order.shape", el("span", { text: txt("tool.pieces.shapeTop", { nIn: o.nIn, nOut: o.nOut }) }), true));
-  const main = el("div", { class: "ov-main" }, facts, piecedIntro(pieces), ...pieces.map((p, k) => pieceBox(p, k)));
+  const main = el("div", { class: "ov-main" }, facts, piecedIntro(pieces, data), data.needsTop ? topBox(o, pieces, data, now) : null, ...pieces.map((p, k) => pieceBox(p, k)));
   const side = el("div", { class: "ov-side" });
   if (o.status === 0) {
     side.append(el("div", { class: "box", id: "pieces-how" }, el("p", { class: "help", text: txt("tool.pieces.howDeliver") })));
@@ -2174,15 +2236,22 @@ function renderPiecedOrder(box, v, data) {
   box.append(el("div", { class: "ov" }, head, main, side));
 }
 
-// keccak256(abi.encode(pieces, tables)), the contract's piecedHash: pieces as (uint8,uint8,uint8,uint8,uint8)[],
-// tables[i] = pieceTableOf(id, i).
-function piecedFingerprint(pieces) {
+// The contract's piecedHash: keccak256(abi.encode(pieces, tables)) for an order made without wires, and
+// keccak256(abi.encode(pieces, tables, wires)) for one made with them. Pieces as (uint8,uint8,uint8,uint8,uint8)[],
+// tables[i] = pieceTableOf(id, i), wires as (uint8,uint8,uint8,uint8)[] from wiresOf. wiresOf shows the join for a
+// wire-less order too, so the page cannot tell an order created with the join's own wires from one created without:
+// both forms are worked out, and the receipt matches when either equals what the chain wrote.
+function piecedFingerprints(pieces, wires) {
   const V = state.viem;
   const comps = ["kind", "nIn", "nOut", "widthA", "widthB"].map((name) => ({ name, type: "uint8" }));
-  return V.keccak256(V.encodeAbiParameters([{ type: "tuple[]", components: comps }, { type: "bytes[]" }], [
-    pieces.map((p) => ({ kind: p.kind, nIn: p.nIn, nOut: p.nOut, widthA: p.widthA, widthB: p.widthB })),
-    pieces.map((p) => p.table),
-  ]));
+  const wcomps = ["fromPiece", "fromBit", "toPiece", "toBit"].map((name) => ({ name, type: "uint8" }));
+  const ps = pieces.map((p) => ({ kind: p.kind, nIn: p.nIn, nOut: p.nOut, widthA: p.widthA, widthB: p.widthB }));
+  const ts = pieces.map((p) => p.table);
+  const out = [V.keccak256(V.encodeAbiParameters([{ type: "tuple[]", components: comps }, { type: "bytes[]" }], [ps, ts]))];
+  if (wires?.length) {
+    out.push(V.keccak256(V.encodeAbiParameters([{ type: "tuple[]", components: comps }, { type: "bytes[]" }, { type: "tuple[]", components: wcomps }], [ps, ts, wires.map(P.normWire)])));
+  }
+  return out.map((h) => h.toLowerCase());
 }
 
 function renderPiecedReceipt(box, v, data) {
@@ -2201,9 +2270,8 @@ function renderPiecedReceipt(box, v, data) {
   }
   const r = data.receipt;
   head.append(el("p", { class: "help", text: txt("tool.pieces.receiptHelp") }));
-  const fp = piecedFingerprint(pieces).toLowerCase();
-  const hashOk = fp === String(r.tableHash).toLowerCase() && fp === String(data.piecedHash).toLowerCase();
-  const single = pieces.length === 1;
+  const hashOk = piecedFingerprints(pieces, data.wires).some((fp) => fp === String(r.tableHash).toLowerCase() && fp === String(data.piecedHash).toLowerCase());
+  const single = pieces.length === 1 || data.needsTop;
   const rows = [];
   if (single) {
     const rule = data.rule || {};
@@ -2221,8 +2289,12 @@ function renderPiecedReceipt(box, v, data) {
     el("dd", {}, el("span", { class: "mono", id: "receipt-piece-" + k, text: circuitText(p.delivery) })))));
   const facts = el("dl", { class: "facts", id: "receipt-facts" }, ...rows);
   facts.append(fact("tool.order.shape", el("span", { text: txt("tool.pieces.shapeTop", { nIn: o.nIn, nOut: o.nOut }) }), true));
-  const main = el("div", { class: "ov-main" }, facts, piecedIntro(pieces), ...pieces.map((p, k) => pieceBox(p, k)));
-  const side = el("div", { class: "ov-side" }, piecedTryBox(o, pieces, data.labels, i));
+  if (data.needsTop) {
+    facts.append(el("div", { class: "wide" }, el("dt", { text: txt("tool.pieces.topHeading") }),
+      el("dd", {}, el("span", { class: "mono", id: "receipt-top", text: txt("tool.pieces.topDelivered", { id: r.circuitId.toString(), proc: r.processor, gates: fmtInt(data.delivery.gateCount) }) }))));
+  }
+  const main = el("div", { class: "ov-main" }, facts, piecedIntro(pieces, data), ...pieces.map((p, k) => pieceBox(p, k)));
+  const side = el("div", { class: "ov-side" }, piecedTryBox(o, pieces, data.labels, i, data));
   box.append(el("div", { class: "ov" }, head, main, side));
 }
 
@@ -2230,11 +2302,20 @@ function renderPiecedReceipt(box, v, data) {
 // Same protections as tryBox / doRun: switches off while a call is out, an answer for another view, network or
 // switch setting is dropped, an answer is only shown when every byte came back, and a call too big for a public
 // node's free-call cap is not made at all.
-function piecedTryBox(o, pieces, labels, i) {
+// The gate counts a run of this order holds gas for: every piece (run re-reads each piece's netlist), plus the top
+// circuit for a "needs a top" order (one eval of the top, whose gate count includes the pieces' gates).
+function runGates(pieces, data) {
+  const g = pieces.map((p) => p.delivery.gateCount);
+  if (data?.needsTop && data.delivery) g.push(data.delivery.gateCount);
+  return g;
+}
+
+function piecedTryBox(o, pieces, labels, i, data) {
   const v = state.view;
   const n = o.nIn;
   if (!v.tryBits || v.tryBits.length !== n) v.tryBits = new Array(n).fill(0);
-  const box = el("div", { class: "box", id: "try-box" }, el("h4", { text: txt("tool.receipt.tryHeading") }), el("p", { class: "help", text: txt("tool.pieces.tryHelp") }));
+  const help = data?.needsTop ? "tool.pieces.tryHelpTop" : data && !data.joined ? "tool.pieces.tryHelpChain" : "tool.pieces.tryHelp";
+  const box = el("div", { class: "box", id: "try-box" }, el("h4", { text: txt("tool.receipt.tryHeading") }), el("p", { class: "help", text: txt(help) }));
   const body = el("tbody");
   for (let k = 0; k < n; k++) {
     const name = colHead(labels, k, n);
@@ -2249,10 +2330,10 @@ function piecedTryBox(o, pieces, labels, i) {
   }
   box.append(el("table", { class: "try-table" },
     el("thead", {}, el("tr", {}, el("th", { scope: "col", text: txt("tool.receipt.colInput") }), el("th", { scope: "col", text: txt("tool.receipt.colValue") }))), body));
-  const gas = G.runPiecedGasLimit(i, pieces.map((p) => p.delivery.gateCount));
+  const gas = G.runPiecedGasLimit(i, runGates(pieces, data));
   const fits = gas <= G.SIM_GAS_CAP;
   const btn = el("button", { type: "button", class: "btn btn-primary", id: "run-btn", text: txt(v.busy === "run" ? "tool.receipt.running" : "tool.receipt.runBtn"), disabled: !fits || !!v.busy });
-  btn.addEventListener("click", () => doRunPieced(o, pieces));
+  btn.addEventListener("click", () => doRunPieced(o, pieces, data));
   box.append(btn);
   if (!fits) box.append(el("p", { class: "msg is-err", id: "run-toobig", text: txt("tool.pieces.tooBig", { gas: fmtInt(gas) }) }));
   const res = v.tryResult;
@@ -2263,10 +2344,10 @@ function piecedTryBox(o, pieces, labels, i) {
   return box;
 }
 
-async function doRunPieced(o, pieces) {
+async function doRunPieced(o, pieces, data) {
   const v = state.view;
   const i = info();
-  const gas = G.runPiecedGasLimit(i, pieces.map((p) => p.delivery.gateCount));
+  const gas = G.runPiecedGasLimit(i, runGates(pieces, data));
   if (gas > G.SIM_GAS_CAP) return;
   const bits = v.tryBits.slice();
   let x = 0n;
@@ -2284,7 +2365,8 @@ async function doRunPieced(o, pieces) {
     if (outBytes.length !== Math.ceil(o.nOut / 8)) throw new Error("short answer");
     const out = P.readBitsBig(outBytes, 0, o.nOut);
     const bitsText = (val) => Array.from({ length: o.nOut }, (_, k) => `y${k}=${(val >> BigInt(k)) & 1n}`).join(" ");
-    const exp = P.joinExpected(pieces, pieces.map((p) => state.viem.hexToBytes(p.table)), x);
+    const tables = pieces.map((p) => state.viem.hexToBytes(p.table));
+    const exp = data?.wires ? P.chainExpected(pieces, tables, data.wires, o.nOut, x) : P.joinExpected(pieces, tables, x);
     v.tryResult = {
       text: txt("tool.pieces.result", { out: bitsText(out) }),
       check: exp === out ? { ok: true, text: txt("tool.pieces.match", { c: x.toString() }) } : { ok: false, text: txt("tool.pieces.mismatch", { c: x.toString(), exp: bitsText(exp) }) },

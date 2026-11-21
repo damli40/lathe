@@ -180,6 +180,13 @@ function netlistBytes(a, proc, id) {
   return (r.out.length - 2) / 2;
 }
 
+/// True for an order created as "needs a top circuit" (LatheOrders.needsTop): its last piece passing does not pay;
+/// the builder then delivers one top circuit with deliverTop. A contract from before V3b has no needsTop: false.
+function readNeedsTop(a) {
+  const r = cast(['call', a.lathe, 'needsTop(uint256)(bool)', String(a.order), '--rpc-url', a.rpc]);
+  return r.ok && r.out.trim() === 'true';
+}
+
 const topic = (sig) => cast(['keccak', sig]).out.toLowerCase();
 
 /// Chain id and block gas limit, read once at start.
@@ -207,13 +214,15 @@ function main() {
   if (/^0x0{40}$/i.test(s.proc)) die('this piece has no delivery: the builder must call deliverPiece first');
   if (s.next >= s.total) die(`piece already passed (${s.next}/${s.total})`);
 
+  const needsTop = readNeedsTop(a);
   const myNet = netlistBytes(a, s.proc, s.circuitId);
   const allNets = s.all.map((p) => netlistBytes(a, p.proc, p.id));
   const opts = {
     gates: s.gates,
     netlistBytes: myNet,
     allNetlistBytes: allNets,
-    paysAt: (k) => s.next + k >= s.total, // a batch that finishes the piece may also pay the order
+    // A batch that finishes the piece may also pay the order (never for a needs-top order: it pays at deliverTop).
+    paysAt: (k) => !needsTop && s.next + k >= s.total,
   };
   const want = Math.min(a.batch, s.total - s.next);
   const k = fitBatch(want, opts, ceiling);
@@ -229,6 +238,7 @@ function main() {
   console.log(`order ${a.order} piece ${a.piece}: ${s.next}/${s.total} cases, ${s.gates} gates, budget ${evalBudget(s.gates)} gas per case`);
   console.log(`plan: ${txs} transaction(s) of up to ${k} cases, gas limit ${fullLimit} each (the last one more if it pays)`);
   console.log(`deadline ${new Date(s.deadline * 1000).toISOString()}; checks run until deadline + 1 day`);
+  if (needsTop) console.log(TOP_NOTE);
 
   if (a.dry) {
     const gp = cast(['gas-price', '--rpc-url', a.rpc]);
@@ -306,7 +316,11 @@ function main() {
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`piece ${a.piece} passed: ${sent} transaction(s) in ${secs} s`);
+  if (needsTop) console.log(TOP_NOTE);
 }
+
+const TOP_NOTE = 'this order needs a top circuit: it pays only when the builder calls deliverTop after every piece has passed '
+  + '(read expectedTopNetlist(order), mint a circuit with those bytes and the order\'s nIn / nOut, then deliverTop it)';
 
 function fmtEth(wei) {
   const w = BigInt(wei);

@@ -5,11 +5,13 @@ import {Script, console2} from "forge-std/Script.sol";
 import {LatheOrders} from "../src/LatheOrders.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Piece, PieceKind} from "../src/FormulaLib.sol";
+import {Wire, WIRE_TOP} from "../src/NetlistLib.sol";
+import {RefProcessor} from "../test/mocks/RefProcessor.sol";
 
 /// @notice Testnet smoke run (chain 1952) against the contracts DeployTestnet made.
-/// Env: LATHE, USDT, PROCESSOR, XOR_ID, WRONG_ID, FORMULA_PROCESSOR; optional TOGGLE_ID (default 3),
-/// WRONG_TOGGLE_ID (default 4), ADD22_ID (1), GE32_ID (2), GE32_WRONG_ID (3), GE66_ID (4), REFUND_DELAY (seconds,
-/// default 300).
+/// Env: LATHE, USDT, PROCESSOR, XOR_ID, WRONG_ID, FORMULA_PROCESSOR, REF_PROCESSOR; optional TOGGLE_ID (default 3),
+/// WRONG_TOGGLE_ID (default 4), ADD22_ID (1), GE32_ID (2), GE32_WRONG_ID (3), GE66_ID (4), GE23_ID (5),
+/// REFUND_DELAY (seconds, default 300).
 /// The broadcaster must be the deployer (it owns the mock circuits and holds the mUSDT). Every order names the
 /// broadcaster as its builder: the contract refuses an order without one (BuilderRequired).
 ///   (a) 2-input XOR order + deliver the honest circuit. deliver checks small circuits inline, so it pays at once.
@@ -35,6 +37,16 @@ import {Piece, PieceKind} from "../src/FormulaLib.sol";
 ///       equal the formula above (inputs where bit order matters are logged).
 ///   (j) a one-piece order GreaterOrEqual(6, 6) (12 inputs, 4,096 cases) delivered with formula circuit 4: too many
 ///       cases to check inside the delivery, so the log prints the scripts/crank.mjs command that checks it.
+///   (k) daily-cap-shaped order with explicit wires, "Lathe joins": inputs x0x1 = spent, x2x3 = amount, x4x5 = cap
+///       (2-bit numbers, LSB first). Piece 0 = Add(2, 2) on spent and amount (3-bit sum); piece 1 =
+///       GreaterOrEqual(2, 3): a = cap, b = the sum. Allowed = cap >= spent + amount. Pays when piece 1 passes;
+///       run on all 64 inputs must equal that rule.
+///   (l) the same order as "needs a top circuit": both pieces pass but it stays Open; the script reads
+///       expectedTopNetlist, mints a top with those bytes (6 inputs, 1 output) on the REF_PROCESSOR, and
+///       deliverTop pays. ruleOf names the top; run (one eval of the top) must equal the rule on all 64 inputs.
+///   (m) a third needs-top order, both pieces passed; two bad tops are minted: the right bytes with the wrong shape
+///       (7 inputs) and wrong bytes (the comparator's five input wires rotated by one). Both deliverTop
+///       calls are simulated like (b) and must revert ShapeMismatch and WrongTopCircuit; the order stays Open.
 contract Smoke is Script {
     bytes internal constant XOR_TABLE = hex"06"; // cases 0..3 -> 0,1,1,0, LSB first
     /// Toggle: case c = x0 + 2s; new memory = s XOR x0, output = new memory; answers 0,3,3,0 = 0x3c.
@@ -57,6 +69,13 @@ contract Smoke is Script {
     uint256 internal piecedPaidId;
     uint256 internal piecedHalfId;
     uint256 internal crankId;
+    /// Ids for (k), (l), (m), and the tops minted for (l) and (m).
+    uint256 internal joinedId;
+    uint256 internal toppedId;
+    uint256 internal badTopId;
+    uint256 internal goodTop;
+    uint256 internal wrongShapeTop;
+    uint256 internal wrongBytesTop;
 
     function run() external {
         require(block.chainid == 1952, "Smoke: not X Layer testnet (1952)");
@@ -73,7 +92,7 @@ contract Smoke is Script {
 
         vm.startBroadcast();
         (, address me,) = vm.readCallers();
-        usdt.approve(address(lathe), 8 * uint256(AMOUNT));
+        usdt.approve(address(lathe), 11 * uint256(AMOUNT));
 
         // (a) honest XOR -> Paid
         uint256 a = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, deadline, me, 0);
@@ -93,6 +112,7 @@ contract Smoke is Script {
         // queued after it would be sent with a nonce the chain skips (seen on the local anvil run).
         _sendMemoryOrders(lathe, me, processor);
         _sendPiecedOrders(lathe);
+        _sendWiredOrders(lathe);
         vm.stopBroadcast();
 
         _logStatus("(a) honest XOR, expect Paid(2)", lathe, a);
@@ -151,6 +171,117 @@ contract Smoke is Script {
 
         _memoryAndReads(lathe, me, processor, xorId, a);
         _piecedChecks(lathe, me);
+        _wiredChecks(lathe, me);
+    }
+
+    /// The daily-cap shape on 2-bit numbers. Wires listed in sorted form: piece 0's inputs, piece 1's, the output.
+    function _dailyCapSpec(bool top) internal pure returns (LatheOrders.PiecedSpec memory s) {
+        s.pieces = new Piece[](2);
+        s.pieces[0] = Piece(PieceKind.Add, 4, 3, 2, 2);
+        s.pieces[1] = Piece(PieceKind.GreaterOrEqual, 5, 1, 2, 3);
+        s.tables = new bytes[](2);
+        s.maxGates = new uint32[](2);
+        s.labels = new bytes32[](0);
+        s.wires = new Wire[](10);
+        for (uint8 j = 0; j < 4; ++j) {
+            s.wires[j] = Wire(WIRE_TOP, j, 0, j); // spent, amount -> the adder
+        }
+        s.wires[4] = Wire(WIRE_TOP, 4, 1, 0); // cap -> comparator a
+        s.wires[5] = Wire(WIRE_TOP, 5, 1, 1);
+        for (uint8 j = 0; j < 3; ++j) {
+            s.wires[6 + j] = Wire(0, j, 1, 2 + j); // sum -> comparator b
+        }
+        s.wires[9] = Wire(1, 0, WIRE_TOP, 0);
+        s.needsTop = top;
+    }
+
+    /// cap >= spent + amount, each a 2-bit number LSB first in x.
+    function _expectedDailyCap(uint256 x) internal pure returns (uint8) {
+        return ((x >> 4) & 3) >= (x & 3) + ((x >> 2) & 3) ? 1 : 0;
+    }
+
+    /// (k), (l), (m), sent inside run()'s broadcast (before any simulated call, see run()).
+    function _sendWiredOrders(LatheOrders lathe) internal {
+        (, address me,) = vm.readCallers();
+        address fp = vm.envAddress("FORMULA_PROCESSOR");
+        RefProcessor rp = RefProcessor(vm.envAddress("REF_PROCESSOR"));
+        uint256 add22 = vm.envOr("ADD22_ID", uint256(1));
+        uint256 ge23 = vm.envOr("GE23_ID", uint256(5));
+        uint64 deadline = uint64(block.timestamp + 1 days);
+        joinedId = lathe.createPiecedOrder(_dailyCapSpec(false), AMOUNT, deadline, me);
+        toppedId = lathe.createPiecedOrder(_dailyCapSpec(true), AMOUNT, deadline, me);
+        badTopId = lathe.createPiecedOrder(_dailyCapSpec(true), AMOUNT, deadline, me);
+        uint256[3] memory ids = [joinedId, toppedId, badTopId];
+        for (uint256 i = 0; i < 3; ++i) {
+            lathe.deliverPiece{gas: PIECE_GAS}(ids[i], 0, fp, add22);
+            lathe.deliverPiece{gas: PIECE_GAS}(ids[i], 1, fp, ge23);
+        }
+        bytes memory nl = lathe.expectedTopNetlist(toppedId);
+        goodTop = rp.mint(nl, 6, 1, me);
+        lathe.deliverTop(toppedId, address(rp), goodTop);
+        wrongShapeTop = rp.mint(nl, 7, 1, me);
+        wrongBytesTop = rp.mint(_swappedTop(lathe, badTopId), 6, 1, me);
+    }
+
+    /// The bad top's bytes: the order's own expected bytes with the comparator's five input wires rotated by one
+    /// (cap bit 1, sum bits 0-2, cap bit 0). Still a valid netlist (every wire points backwards), but not the wiring
+    /// ordered, so its hash differs.
+    function _swappedTop(LatheOrders lathe, uint256 id) internal view returns (bytes memory) {
+        bytes memory nl = lathe.expectedTopNetlist(id);
+        // Piece 1's record starts after piece 0's (31 + 3 x 4 bytes); its 5 input wires follow its 31-byte head.
+        // Rotate them: the wire numbers stay valid (all point backwards), only the wiring changes.
+        uint256 at = 43 + 31;
+        bytes memory out = nl;
+        bytes memory first = new bytes(3);
+        for (uint256 i = 0; i < 3; ++i) {
+            first[i] = nl[at + i];
+        }
+        for (uint256 i = 0; i < 12; ++i) {
+            out[at + i] = nl[at + 3 + i];
+        }
+        for (uint256 i = 0; i < 3; ++i) {
+            out[at + 12 + i] = first[i];
+        }
+        return out;
+    }
+
+    /// Checks for (k), (l), (m). Split out of run() to keep the stack small.
+    function _wiredChecks(LatheOrders lathe, address me) internal {
+        address rp = vm.envAddress("REF_PROCESSOR");
+        _logStatus("(k) daily-cap shape, explicit wires, Lathe joins, expect Paid(2)", lathe, joinedId);
+        require(_status(lathe, joinedId) == LatheOrders.Status.Paid, "Smoke (k): not Paid");
+        require(!lathe.needsTop(joinedId), "Smoke (k): needsTop");
+        require(lathe.wiresOf(joinedId).length == 10, "Smoke (k): wiresOf");
+        _logStatus("(l) the same as needs a top circuit, top minted and delivered, expect Paid(2)", lathe, toppedId);
+        require(_status(lathe, toppedId) == LatheOrders.Status.Paid, "Smoke (l): not Paid");
+        (address tp, uint256 tc) = lathe.ruleOf(toppedId);
+        require(tp == rp && tc == goodTop, "Smoke (l): ruleOf is not the top");
+        (address rpr, uint256 rc, bytes32 rh,) = lathe.receipts(toppedId);
+        require(rpr == rp && rc == goodTop && rh == lathe.piecedHash(toppedId), "Smoke (l): receipt");
+        for (uint256 x = 0; x < 64; ++x) {
+            bytes memory inp = abi.encodePacked(uint8(x));
+            bytes memory j = lathe.run{gas: PIECED_RUN_GAS}(joinedId, inp);
+            bytes memory t = lathe.run{gas: PIECED_RUN_GAS}(toppedId, inp);
+            require(j.length == 1 && uint8(j[0]) == _expectedDailyCap(x), "Smoke (k): run disagrees");
+            require(keccak256(t) == keccak256(j), "Smoke (l): run via the top disagrees");
+        }
+        console2.log("    top circuit", goodTop, "on the REF processor; ruleOf names it");
+        console2.log("    run(k) and run(l) on all 64 inputs = cap >= spent + amount; x=0x25 -> 1, x=0x27 -> 0");
+
+        _expectTopRefused(lathe, me, wrongShapeTop, LatheOrders.ShapeMismatch.selector, "ShapeMismatch");
+        _expectTopRefused(lathe, me, wrongBytesTop, LatheOrders.WrongTopCircuit.selector, "WrongTopCircuit");
+        _logStatus("(m) both bad tops refused (simulated, not sent), order stays Open(0)", lathe, badTopId);
+        require(_status(lathe, badTopId) == LatheOrders.Status.Open, "Smoke (m): not Open");
+    }
+
+    function _expectTopRefused(LatheOrders lathe, address me, uint256 top, bytes4 sel, string memory name) internal {
+        vm.prank(me);
+        try lathe.deliverTop(badTopId, vm.envAddress("REF_PROCESSOR"), top) {
+            revert(string.concat("Smoke (m): bad top accepted, wanted ", name));
+        } catch (bytes memory err) {
+            require(bytes4(err) == sel, string.concat("Smoke (m): reverted, but not with ", name));
+            console2.log(string.concat("(m) bad top ", vm.toString(top), ": deliverTop reverts ", name));
+        }
     }
 
     /// Piece 0 = Add(2, 2): 4 inputs, 3 outputs. Piece 1 = GreaterOrEqual(3, 2): 5 inputs, 1 output.

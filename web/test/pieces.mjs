@@ -7,6 +7,12 @@
 //   (4) a two-piece order with a short deadline and piece 2 never delivered;
 //   (5) a paid 1-piece order (GreaterOrEqual(3,2));
 //   (6) a paid two-piece order of 1,600-gate pieces: running it needs more than the free-call cap.
+//   (7) a paid 3-piece order with explicit wires, paid as "Lathe joins": Add(2,2), GreaterOrEqual(2,3) (cap x4 x5
+//       against the sum), then XOR (a table piece) of that answer with x6;
+//   (8) a 2-bit daily-cap order that needs a top circuit, both pieces passed, top minted on the REF processor and
+//       delivered with deliverTop (paid; the receipt names the top);
+//   (9) the same, both pieces passed, no top yet (open, waiting for the top);
+//  (10) the same, only piece 1 delivered (open, waiting for the pieces).
 // Then anvil time moves 200 s, past the short deadlines of (2) and (4).
 // Asserts the true statements (made of N pieces, each piece's rule, state and cap, the refund rule matching
 // LatheOrders.refund, the pieced receipt fingerprint, each piece's circuit, no single circuit, run answers on inputs
@@ -87,6 +93,42 @@ try {
   for (let k = 0; k < 4; k++) checkPiece(O6, 0, 7, 200_000_000);
   for (let k = 0; k < 6; k++) checkPiece(O6, 1, 7, 200_000_000);
   assert(status(O6) === "2", `order ${O6}: 1,600-gate pieces checked in batches and paid`);
+
+  // Wired orders: createPiecedOrder(PiecedSpec, amount, deadline, builder).
+  const SPEC = "createPiecedOrder(((uint8,uint8,uint8,uint8,uint8)[],bytes[],uint32[],bytes32[],(uint8,uint8,uint8,uint8)[],bool),uint96,uint64,address)";
+  const T = 255;
+  const createWired = (pieces, tables, wires, needsTop) => {
+    const spec = `([${pieces.join(",")}],[${tables.join(",")}],[${pieces.map(() => "0").join(",")}],[],[${wires.map((w) => `(${w.join(",")})`).join(",")}],${needsTop})`;
+    send(L, SPEC, spec, "1000000", far, ANVIL_ACCOUNT0);
+    return String(BigInt(cast("call", L, "nextOrderId()(uint256)").split(" ")[0]) - 1n);
+  };
+  const ADD = "(2,4,3,2,2)";
+  const GE23 = "(1,5,1,2,3)";
+  const XOR = "(0,2,1,0,0)";
+  const capWires = [[T, 0, 0, 0], [T, 1, 0, 1], [T, 2, 0, 2], [T, 3, 0, 3], [T, 4, 1, 0], [T, 5, 1, 1], [0, 0, 1, 2], [0, 1, 1, 3], [0, 2, 1, 4]];
+  const O7 = createWired([ADD, GE23, XOR], ["0x", "0x", "0x06"], [...capWires, [1, 0, 2, 0], [T, 6, 2, 1], [2, 0, T, 0]], false);
+  deliverPiece(O7, 0, 1);
+  deliverPiece(O7, 1, 5);
+  send(L, "deliverPiece(uint256,uint256,address,uint256)", O7, "2", addrs.processor, "1", "--gas-limit", "30000000");
+  assert(status(O7) === "2", `order ${O7}: 3-piece wired order paid when the last piece passed`);
+
+  const R = addrs.ref;
+  assert(/^0x[0-9a-fA-F]{40}$/.test(R || ""), "DeployTestnet logged the REF processor");
+  const topWires = [...capWires, [1, 0, T, 0]];
+  const O8 = createWired([ADD, GE23], ["0x", "0x"], topWires, true);
+  deliverPiece(O8, 0, 1);
+  deliverPiece(O8, 1, 5);
+  assert(status(O8) === "0", `order ${O8}: needs a top, still open after both pieces passed`);
+  const nl = cast("call", L, "expectedTopNetlist(uint256)(bytes)", O8);
+  send(R, "mint(bytes,uint32,uint32,address)", nl, "6", "1", ANVIL_ACCOUNT0);
+  const TOP = cast("call", R, "lastId()(uint256)").split(" ")[0];
+  send(L, "deliverTop(uint256,address,uint256)", O8, R, TOP, "--gas-limit", "30000000");
+  assert(status(O8) === "2", `order ${O8}: paid at deliverTop`);
+  const O9 = createWired([ADD, GE23], ["0x", "0x"], topWires, true);
+  deliverPiece(O9, 0, 1);
+  deliverPiece(O9, 1, 5);
+  const O10 = createWired([ADD, GE23], ["0x", "0x"], topWires, true);
+  deliverPiece(O10, 0, 1);
 
   await rpc(anvil.url, "evm_increaseTime", [200]);
   await rpc(anvil.url, "evm_mine", []);
@@ -202,10 +244,79 @@ try {
   assert((await page.locator("#run-result").count()) === 0, "no answer shown");
   assert((await page.locator("#receipt-hash").textContent()).startsWith("Matches"), "fingerprint still matches");
 
+  console.log(`(7) paid 3-piece wired order ${O7}`);
+  await openView("order", O7);
+  assert(/made of 3 pieces/.test(await page.locator("#pieces-made-of").textContent()), "says 3 pieces");
+  assert((await page.locator("#pieces-progress").textContent()) === "3 of 3 pieces passed.", "per-order progress: 3 of 3");
+  const wires7 = await page.locator("#pieces-wires li").allTextContents();
+  assert(JSON.stringify(wires7) === JSON.stringify([
+    "Piece 1 inputs 0 to 3 come from the order's inputs x0 to x3.",
+    "Piece 2 inputs 0 to 1 come from the order's inputs x4 to x5.",
+    "Piece 2 inputs 2 to 4 come from piece 1 outputs 0 to 2.",
+    "Piece 3 input 0 comes from piece 2 output 0.",
+    "Piece 3 input 1 comes from the order's input x6.",
+    "The order's output y0 comes from piece 3 output 0.",
+  ]), "wires in plain words: " + JSON.stringify(wires7));
+  assert((await page.locator("#pieces-join, #top-box").count()) === 0, "no fixed-join text and no top box for a wired Lathe-joins order");
+  assert(/Passed: all 4 cases/.test(await pieceText(2)), "piece 3 (XOR) passed on its 4 cases");
+  await noFalse("order (7)");
+  await openView("receipt", O7);
+  assert((await page.locator("#receipt-hash").textContent()) === `Matches the pieces shown here and piecedHash(${O7}).`, "wired receipt fingerprint = keccak256(abi.encode(pieces, tables, wires))");
+  assert(/has no single circuit/.test(await page.locator("#receipt-nosingle").textContent()), "a Lathe-joins order has no single circuit");
+  for (const [bits, want] of [[[0, 0, 0, 0, 1, 1, 0], 1], [[1, 1, 1, 0, 1, 1, 0], 0], [[1, 1, 1, 0, 1, 1, 1], 1], [[1, 0, 1, 0, 1, 1, 1], 0]]) {
+    for (let k = 0; k < 7; k++) {
+      if ((await page.locator(`#try-box button.bit[data-k="${k}"]`).getAttribute("aria-pressed")) !== String(!!bits[k])) await page.click(`#try-box button.bit[data-k="${k}"]`);
+    }
+    await page.click("#run-btn");
+    await page.waitForSelector("#run-result", { timeout: T_LONG });
+    const r = await page.locator("#run-result").textContent();
+    assert(r === `The rule answered y0=${want}.` && /same answer/.test(await page.locator("#run-check").textContent()), `3-piece run on [${bits}] answers y0=${want}: ${r}`);
+  }
+  await noFalse("receipt (7)");
+
+  console.log(`(8) needs-a-top order ${O8}, top delivered and paid`);
+  await openView("order", O8);
+  assert(/needs a top circuit/.test(await page.locator("#pieces-made-of").textContent()), "says the order needs a top circuit");
+  assert((await page.locator("#top-state").getAttribute("data-state")) === "delivered" && (await page.locator("#top-state").textContent()).includes(`Circuit ${TOP} on processor ${R}`), "top box names the delivered top");
+  await openView("receipt", O8);
+  assert((await page.locator("#receipt-facts").textContent()).includes(R), "receipt names the REF processor");
+  assert((await page.locator("#receipt-top").textContent()).startsWith(`Circuit ${TOP} on processor ${R}`), "receipt shows the top circuit");
+  assert(/ruleOf/.test(await page.locator("#receipt-rule").textContent()) && !(await page.locator("#receipt-rule").getAttribute("class")).includes("bad"), "ruleOf names the top: " + await page.locator("#receipt-rule").textContent());
+  assert((await page.locator("#receipt-nosingle").count()) === 0, "no 'no single circuit' line for a topped order");
+  assert((await page.locator("#receipt-hash").textContent()).startsWith("Matches"), "topped receipt fingerprint matches");
+  for (const [bits, want] of [[[1, 0, 1, 0, 0, 1], 1], [[1, 1, 1, 0, 0, 1], 0]]) {
+    for (let k = 0; k < 6; k++) {
+      if ((await page.locator(`#try-box button.bit[data-k="${k}"]`).getAttribute("aria-pressed")) !== String(!!bits[k])) await page.click(`#try-box button.bit[data-k="${k}"]`);
+    }
+    await page.click("#run-btn");
+    await page.waitForSelector("#run-result", { timeout: T_LONG });
+    const r = await page.locator("#run-result").textContent();
+    assert(r === `The rule answered y0=${want}.` && /same answer/.test(await page.locator("#run-check").textContent()), `run via the top on [${bits}] answers y0=${want}: ${r}`);
+  }
+  await noFalse("receipt (8)");
+
+  console.log(`(9) needs-a-top order ${O9}, pieces passed, no top yet`);
+  await openView("order", O9);
+  assert((await page.locator("#order-status").textContent()).length > 0 && (await page.locator("#top-state").getAttribute("data-state")) === "waiting", "waiting for the top");
+  assert(/Every piece has passed\. Waiting for the builder to deliver the top circuit with deliverTop/.test(await page.locator("#top-state").textContent()), "says the top is next");
+  assert((await page.locator("#pieces-progress").textContent()) === "2 of 2 pieces passed.", "2 of 2 passed");
+  assert((await page.locator("#pieces-wires li").count()) === 4, "wires listed (not the fixed join)");
+  await noFalse("order (9)");
+
+  console.log(`(10) needs-a-top order ${O10}, piece 2 not delivered`);
+  await openView("order", O10);
+  assert((await page.locator("#top-state").getAttribute("data-state")) === "pieces" && /Waiting for every piece to pass/.test(await page.locator("#top-state").textContent()), "waiting for the pieces");
+  assert((await page.locator("#pieces-progress").textContent()) === "1 of 2 pieces passed.", "1 of 2 passed");
+  await noFalse("order (10)");
+
   console.log("ZH strings");
   await page.goto(`${server.url}?lang=zh&order=${O1}`);
   await page.waitForSelector("#pieces-made-of", { timeout: T_LONG });
   assert(/由 2 个部件组成/.test(await page.locator("#pieces-made-of").textContent()) && /a 加 b/.test(await pieceText(0)), "Chinese view: made of 2 pieces, a plus b");
+  await page.goto(`${server.url}?lang=zh&order=${O9}`);
+  await page.waitForSelector("#top-state", { timeout: T_LONG });
+  assert(/需要一个顶层电路/.test(await page.locator("#pieces-made-of").textContent()) && /deliverTop/.test(await page.locator("#top-state").textContent()), "Chinese view: needs a top circuit, waiting for deliverTop");
+  assert(/部件 2 的输入 2 到 4 来自部件 1 的输出 0 到 2/.test(await page.locator("#pieces-wires").textContent()), "Chinese wire text");
 
   assert(errors.length === 0, "no page errors" + (errors.length ? ": " + errors.join(" | ") : ""));
   console.log("PIECES PASS: pieced orders shown truthfully in the order and receipt views");
