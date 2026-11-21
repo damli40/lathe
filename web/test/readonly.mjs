@@ -1,10 +1,10 @@
-// Read-only against the live X Layer testnet contract, no wallet installed: orders 1, 2, 5 from the smoke run
-// (evidence/2026-11-21-testnet-final.md) must show Paid, Open, Refunded. Also checks the mainnet "not deployed" state.
+// Read-only against the live X Layer testnet contract, no wallet installed: orders 1, 2, 3 from the smoke run
+// (evidence/2026-11-21-testnet-case-gas.md) must show Paid, Open, Refunded. Also checks the mainnet "not deployed" state.
 // Only eth_call / eth_getBlock reads go to the public RPC. Run from the repo root: node web/test/readonly.mjs
 import { serve, playwright, assert } from "./lib.mjs";
 import { waitStatus, statusText } from "./flows.mjs";
 
-const want = { 1: "Paid", 2: "Open", 5: "Refunded" };
+const want = { 1: "Paid", 2: "Open", 3: "Refunded" };
 let browser;
 let server;
 try {
@@ -34,7 +34,7 @@ try {
   const notice = await page.locator("#tool-notice h3").textContent();
   assert(notice === "Not on mainnet yet", `mainnet notice: "${notice}"`);
   assert(errors.length === 0, "no page errors" + (errors.length ? ": " + errors.join(" | ") : ""));
-  console.log("READONLY PASS: live testnet orders 1, 2, 5 = Paid, Open, Refunded with no wallet");
+  console.log("READONLY PASS: live testnet orders 1, 2, 3 = Paid, Open, Refunded with no wallet");
 } catch (e) {
   console.error("READONLY FAIL:", e.message);
   process.exitCode = 1;
