@@ -126,13 +126,24 @@ test("payout after fee matches LatheOrders._pay (fee rounds down) and the percen
   assert.equal(feePercent(500), "5");
 });
 
-import { runGasLimit, runFitsSim, perCaseHold as hold2, RUN_OVERHEAD, SIM_GAS_CAP as CAP2 } from "../gas.js";
+import { runGasLimit, runPiecedGasLimit, runFitsSim, perCaseHold as hold2, RUN_OVERHEAD, SIM_GAS_CAP as CAP2 } from "../gas.js";
 
-test("run gas: overhead + netlist + one case's hold; big circuits do not fit the 48M test-call cap", () => {
+test("run gas: overhead + netlist + one case's hold, x 64/63 for the library hop; big circuits do not fit the 48M test-call cap", () => {
   const c = { base: 100_000n, perGate: 15_000n, reserve: 20_000n };
-  assert.equal(runGasLimit(c, 4), RUN_OVERHEAD + 600n * 4n + hold2(c, 4));
+  const up = (g) => (g * 64n + 62n) / 63n;
+  assert.equal(runGasLimit(c, 4), up(RUN_OVERHEAD + 600n * 4n + hold2(c, 4)));
+  // the figure test/LatheOrders.libs.t.sol runs the contract at (pageRunGas(200) there)
+  assert.equal(runGasLimit(c, 200), 3_646_179n);
   assert.ok(runFitsSim(c, 4));
   assert.ok(runFitsSim(c, 652)); // the 8x8 multiplier
   assert.ok(!runFitsSim(c, 4000)); // budget 60.1M is above the cap
   assert.ok(runGasLimit(c, 3000) <= CAP2 === runFitsSim(c, 3000));
+});
+
+test("pieced run gas: every piece's netlist and hold, x 64/63 (same figure as test/LatheOrders.libs.t.sol)", () => {
+  const c = { base: 100_000n, perGate: 15_000n, reserve: 20_000n };
+  const up = (g) => (g * 64n + 62n) / 63n;
+  assert.equal(runPiecedGasLimit(c, [4]), runGasLimit(c, 4));
+  assert.equal(runPiecedGasLimit(c, [200, 200]), up(RUN_OVERHEAD + 2n * (600n * 200n + hold2(c, 200))));
+  assert.ok(runPiecedGasLimit(c, [70, 652]) > runGasLimit(c, 652));
 });

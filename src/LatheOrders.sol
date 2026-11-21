@@ -8,6 +8,17 @@ import {TableLib} from "./TableLib.sol";
 import {FormulaLib, Piece, PieceKind} from "./FormulaLib.sol";
 import {BitLib} from "./BitLib.sol";
 import {IProcessor, IProcessorFactory} from "./ITapeOut.sol";
+import {LatheChecks} from "./LatheChecks.sol";
+import {LatheReads} from "./LatheReads.sol";
+import {
+    LATHE_MAX_CASE_BITS,
+    LATHE_MAX_ANSWER_BITS,
+    LATHE_EVAL_BASE_GAS,
+    LATHE_EVAL_GAS_PER_GATE,
+    LATHE_GAS_RESERVE,
+    LATHE_MAX_PIECES,
+    LATHE_MAX_FORMULA_BITS
+} from "./LatheConstants.sol";
 
 /// @title LatheOrders
 /// @notice A buyer locks USD₮0 for a truth table. A builder delivers a TapeOut circuit. The contract runs
@@ -64,17 +75,17 @@ contract LatheOrders is ReentrancyGuard {
 
     uint256 public constant GRACE = 1 days;
     uint16 public constant MAX_FEE_BPS = 500;
-    uint256 public constant MAX_CASE_BITS = 6; // nIn + nState <= 6, so at most 64 cases
-    uint256 public constant MAX_ANSWER_BITS = 16; // nOut + nState <= 16
+    uint256 public constant MAX_CASE_BITS = LATHE_MAX_CASE_BITS; // nIn + nState <= 6, so at most 64 cases
+    uint256 public constant MAX_ANSWER_BITS = LATHE_MAX_ANSWER_BITS; // nOut + nState <= 16
 
     /// @notice Each case's eval gets exactly evalBudget(gateCount) gas, never the caller's leftover gas, so a
     /// case's result cannot depend on how much gas the caller sent. Running out of the budget is a wrong answer.
     /// Measured on X Layer (evidence/2026-11-20-eval-gas-budget.md): ~2,320 gas per real gate, ~10,000 per gate
     /// for circuits built from REFs to the 4-gate XOR. The per-gate figure covers the REF-heavy case with 1.5x.
-    uint256 public constant EVAL_BASE_GAS = 100_000;
-    uint256 public constant EVAL_GAS_PER_GATE = 15_000;
+    uint256 public constant EVAL_BASE_GAS = LATHE_EVAL_BASE_GAS;
+    uint256 public constant EVAL_GAS_PER_GATE = LATHE_EVAL_GAS_PER_GATE;
     /// @notice Gas kept back for the work between the gas check and the call, so eval really gets its budget.
-    uint256 public constant GAS_RESERVE = 20_000;
+    uint256 public constant GAS_RESERVE = LATHE_GAS_RESERVE;
     /// @notice Largest budget for one case. A circuit above it could never be checked in one X Layer
     /// transaction (block gas limit 210M) and would hold the order until deadline + grace, so deliver refuses it.
     uint256 public constant MAX_CASE_GAS = 100_000_000;
@@ -83,9 +94,9 @@ contract LatheOrders is ReentrancyGuard {
     /// recorded and checked in batches with check().
     uint256 public constant INLINE_CHECK_MAX_GAS = 30_000_000;
     /// @notice A pieced order has 1 or 2 pieces (V3a). Chains of more pieces need a wiring map (later version).
-    uint256 public constant MAX_PIECES = 2;
+    uint256 public constant MAX_PIECES = LATHE_MAX_PIECES;
     /// @notice Formula pieces have at most 17 inputs (131,072 cases), checked in batches with checkPiece.
-    uint256 public constant MAX_FORMULA_BITS = 17;
+    uint256 public constant MAX_FORMULA_BITS = LATHE_MAX_FORMULA_BITS;
 
     address public immutable factory;
     IERC20 public immutable usdt;
@@ -271,22 +282,9 @@ contract LatheOrders is ReentrancyGuard {
         bytes calldata table,
         Terms memory t
     ) internal returns (uint256 orderId) {
-        _checkTable(nIn, nOut, nState, table);
+        LatheChecks.checkTable(nIn, nOut, nState, table);
         orderId = _newOrder(nIn, nOut, nState, t);
         tableOf[orderId] = table;
-    }
-
-    /// @dev The V0 table rules, shared by Table pieces (with nState 0).
-    function _checkTable(uint8 nIn, uint8 nOut, uint8 nState, bytes calldata table) internal pure {
-        if (uint256(nIn) + nState > MAX_CASE_BITS) revert TooManyCases();
-        if (nOut == 0 || uint256(nOut) + nState > MAX_ANSWER_BITS) revert TooManyOutputs();
-        uint256 cases = uint256(1) << (uint256(nIn) + nState);
-        uint256 tableBits = cases * (uint256(nOut) + nState);
-        if (table.length != TableLib.byteLength(cases, uint256(nOut) + nState)) revert WrongTableLength();
-        // Unused high bits of the last byte must be zero, so each rule has exactly one valid table.
-        if (tableBits % 8 != 0 && uint8(table[table.length - 1]) >> (tableBits % 8) != 0) {
-            revert TablePaddingNotZero();
-        }
     }
 
     function _newOrder(uint8 nIn, uint8 nOut, uint8 nState, Terms memory t) internal returns (uint256 orderId) {
@@ -468,48 +466,17 @@ contract LatheOrders is ReentrancyGuard {
         uint32[] calldata maxGates,
         bytes32[] calldata labels
     ) external nonReentrant returns (uint256 orderId) {
-        (uint8 nIn, uint8 nOut) = _checkPieces(pieces, tables, maxGates);
-        orderId = _newOrder(nIn, nOut, 0, Terms(amount, deadline, builder, 0));
-        for (uint256 i = 0; i < pieces.length; ++i) {
-            _pieces[orderId].push(pieces[i]);
-            pieceTableOf[orderId][i] = tables[i];
-            pieceMaxGatesOf[orderId][i] = maxGates[i];
+        uint8 nIn;
+        {
+            uint8 nOut;
+            (nIn, nOut) = LatheChecks.checkPieces(pieces, tables, maxGates);
+            orderId = _newOrder(nIn, nOut, 0, Terms(amount, deadline, builder, 0));
         }
+        LatheChecks.writePieces(
+            pieces, tables, maxGates, _pieces[orderId], pieceTableOf[orderId], pieceMaxGatesOf[orderId]
+        );
         _setLabels(orderId, labels, nIn);
         _pull(amount);
-    }
-
-    /// @dev Returns the order's top-level shape.
-    function _checkPieces(Piece[] calldata pieces, bytes[] calldata tables, uint32[] calldata maxGates)
-        internal
-        pure
-        returns (uint8 nIn, uint8 nOut)
-    {
-        uint256 n = pieces.length;
-        if (n == 0 || n > MAX_PIECES || tables.length != n || maxGates.length != n) revert BadPieceCount();
-        for (uint256 i = 0; i < n; ++i) {
-            _checkPiece(pieces[i], tables[i]);
-        }
-        nIn = pieces[0].nIn;
-        nOut = pieces[n - 1].nOut;
-        if (n == 2) {
-            if (pieces[1].nIn < pieces[0].nOut) revert BadPiece();
-            nIn = pieces[0].nIn + pieces[1].nIn - pieces[0].nOut;
-        }
-    }
-
-    function _checkPiece(Piece calldata p, bytes calldata table) internal pure {
-        if (p.kind == PieceKind.Table) {
-            if (p.widthA != 0 || p.widthB != 0) revert BadPiece();
-            _checkTable(p.nIn, p.nOut, 0, table);
-            return;
-        }
-        if (table.length != 0) revert WrongTableLength();
-        uint256 w = uint256(p.widthA) + p.widthB;
-        if (w > MAX_FORMULA_BITS) revert TooManyCases();
-        uint256 out = p.kind == PieceKind.Add ? uint256(p.widthA) + 1 : 1;
-        if (p.widthA == 0 || p.widthB == 0 || p.nIn != w || p.nOut != out) revert BadPiece();
-        if (p.kind == PieceKind.Add && p.widthA < p.widthB) revert BadPiece();
     }
 
     /// @notice Offer circuit `circuitId` on `processor` as piece `pieceIndex` of a pieced order. Same guards as
@@ -686,28 +653,6 @@ contract LatheOrders is ReentrancyGuard {
         return ok && got == want;
     }
 
-    /// @dev run for a pieced order: A on x's low A.nIn bits, then B on outA | ((x >> A.nIn) << A.nOut).
-    function _runPieces(uint256 orderId, uint256 x) internal view returns (bytes memory) {
-        Piece[] storage ps = _pieces[orderId];
-        Piece memory a = ps[0];
-        uint256 out = _evalPiece(pieceOf[orderId][0], a, x & ((uint256(1) << a.nIn) - 1));
-        if (ps.length == 1) return BitLib.pack(out, a.nOut);
-        Piece memory b = ps[1];
-        out = _evalPiece(pieceOf[orderId][1], b, out | ((x >> a.nIn) << a.nOut));
-        return BitLib.pack(out, b.nOut);
-    }
-
-    /// @dev One eval of a paid piece with run's guards: unchanged circuit, full budget, enough output bytes.
-    function _evalPiece(Delivery storage d, Piece memory p, uint256 x) internal view returns (uint256) {
-        _requireSame(d, p.nIn, p.nOut, 0);
-        uint256 budget = evalBudget(d.gateCount);
-        bytes memory inputs = BitLib.pack(x, p.nIn);
-        _requireCaseGas(budget);
-        bytes memory out = IProcessor(d.processor).eval{gas: budget}(d.circuitId, inputs);
-        if (out.length < (uint256(p.nOut) + 7) / 8) revert ShortOutput();
-        return BitLib.lowBits(out, p.nOut);
-    }
-
     /// @dev The processor is upgradeable; refuse to judge a circuit that is no longer the one delivered.
     function _requireUnchanged(Order storage o, Delivery storage d) internal view {
         _requireSame(d, o.nIn, o.nOut, o.nState);
@@ -746,6 +691,7 @@ contract LatheOrders is ReentrancyGuard {
     /// @notice The rule a paid order bought: the circuit that passed every case. Reverts NotPaid otherwise.
     /// A 2-piece order has no single circuit (Lathe joins its pieces in run), so it reverts NoSingleCircuit; read
     /// piecesOf and pieceOf instead. A 1-piece order returns its piece's circuit.
+    /// (Kept here, not in LatheReads: as a library call it made this contract 50 bytes larger, measured.)
     function ruleOf(uint256 orderId) external view returns (address processor, uint256 circuitId) {
         if (orders[orderId].status != Status.Paid) revert NotPaid();
         if (_pieces[orderId].length > 1) revert NoSingleCircuit();
@@ -759,13 +705,10 @@ contract LatheOrders is ReentrancyGuard {
     /// unchanged since delivery (else CircuitChanged), and eval gets exactly evalBudget(gateCount) gas, so a caller
     /// with too little gas (for example an RPC that caps eth_call) gets InsufficientGasForCase, never an answer.
     /// Any revert inside eval reverts this call.
+    /// Runs in the linked library LatheReads (contract size), which gets 63/64 of the gas left (EIP-150) and makes
+    /// the per-case gas check itself, right before the circuit call; so the rule above still holds.
     function run(uint256 orderId, bytes calldata inputs) external view returns (bytes memory outputs) {
-        Order storage o = _paidOrder(orderId);
-        if (o.nState != 0 || !_fits(inputs, o.nIn)) revert BadInputs();
-        if (_pieces[orderId].length != 0) return _runPieces(orderId, BitLib.readBits(inputs, 0, o.nIn));
-        Delivery storage d = deliveries[orderId];
-        uint256 budget = _paidBudget(o, d);
-        return _low(IProcessor(d.processor).eval{gas: budget}(d.circuitId, inputs), o.nOut);
+        return LatheReads.run(orders[orderId], _pieces[orderId], deliveries[orderId], pieceOf[orderId], inputs);
     }
 
     /// @notice runStep for an order with memory: one tick of the paid circuit from memory `state` (ceil(nState/8)
@@ -776,36 +719,7 @@ contract LatheOrders is ReentrancyGuard {
         view
         returns (bytes memory newState, bytes memory outputs)
     {
-        Order storage o = _paidOrder(orderId);
-        if (o.nState == 0 || !_fits(inputs, o.nIn) || !_fits(state, o.nState)) revert BadInputs();
-        Delivery storage d = deliveries[orderId];
-        uint256 budget = _paidBudget(o, d);
-        (newState, outputs) = IProcessor(d.processor).step{gas: budget}(d.circuitId, state, inputs);
-        return (_low(newState, o.nState), _low(outputs, o.nOut));
-    }
-
-    function _paidOrder(uint256 orderId) internal view returns (Order storage o) {
-        o = orders[orderId];
-        if (o.status != Status.Paid) revert NotPaid();
-    }
-
-    /// @dev The circuit must be the one delivered, and the caller must leave room for its full budget.
-    function _paidBudget(Order storage o, Delivery storage d) internal view returns (uint256 budget) {
-        _requireUnchanged(o, d);
-        budget = evalBudget(d.gateCount);
-        _requireCaseGas(budget);
-    }
-
-    /// @dev Exactly ceil(nBits/8) bytes and no bit set above nBits.
-    function _fits(bytes calldata b, uint256 nBits) internal pure returns (bool) {
-        if (b.length != (nBits + 7) / 8) return false;
-        return nBits % 8 == 0 || uint8(b[b.length - 1]) >> (nBits % 8) == 0;
-    }
-
-    /// @dev The low nBits of b, packed again so the padding is zero. Too few bytes is an error, never zeros.
-    function _low(bytes memory b, uint256 nBits) internal pure returns (bytes memory) {
-        if (b.length < (nBits + 7) / 8) revert ShortOutput();
-        return BitLib.pack(BitLib.lowBits(b, nBits), nBits);
+        return LatheReads.runStep(orders[orderId], deliveries[orderId], state, inputs);
     }
 
     /// @dev A call can pass on at most 63/64 of the gas left (EIP-150); keep enough so the circuit gets all of

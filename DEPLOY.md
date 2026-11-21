@@ -48,7 +48,11 @@ forge script script/DeployTestnet.s.sol \
   --account lathe-testnet --broadcast
 ```
 
-It refuses to run on any chain except 1952. It prints six lines: `LATHE`, `USDT`, `FACTORY`, `PROCESSOR`, `XOR_ID` (1), `WRONG_ID` (2). Keep them.
+It refuses to run on any chain except 1952.
+
+**It sends two extra transactions first.** `LatheOrders` is too big to fit in one contract with the next versions' room, so two parts of it live in separate contracts called linked libraries: `LatheChecks` (the rules checked when an order is created) and `LatheReads` (`run`, `runStep` and the piece join for paid orders). Neither holds money or can change an order. `forge` deploys both before `LatheOrders` and writes their addresses into its code. It uses the standard CREATE2 deployer (`0x4e59b44847b379578588920ca78fbf26c0b4956c`, present on X Layer testnet and mainnet when checked on 2026-11-21), so a library's address depends only on its compiled code: the same code gets the same address on every chain, and any change to `src/` (even a comment, since it changes the compiled metadata) gives a new one. If a library is already at that address, `forge` skips it. The addresses are in `broadcast/DeployTestnet.s.sol/1952/run-latest.json` under `libraries`.
+
+It prints six lines: `LATHE`, `USDT`, `FACTORY`, `PROCESSOR`, `XOR_ID` (1), `WRONG_ID` (2). Keep them.
 
 **Optional, verify the source on OKLink** (needs an OKLink API key). Add these flags to the command above. `read -s` keeps the key off the screen and out of history:
 
@@ -59,7 +63,18 @@ read -s OKLINK_KEY
 #   --etherscan-api-key $OKLINK_KEY
 ```
 
-Not tested end to end. If it fails, try `xlayer_testnet` in lowercase, or verify after the fact with `forge verify-contract <LATHE address> src/LatheOrders.sol:LatheOrders --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch`.
+Not tested end to end. If it fails, try `xlayer_testnet` in lowercase, or verify after the fact. `LatheOrders` must be verified with the two library addresses, and each library on its own:
+
+```sh
+forge verify-contract <LATHE address> src/LatheOrders.sol:LatheOrders \
+  --libraries src/LatheChecks.sol:LatheChecks:<LatheChecks address> \
+  --libraries src/LatheReads.sol:LatheReads:<LatheReads address> \
+  --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
+forge verify-contract <LatheChecks address> src/LatheChecks.sol:LatheChecks --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
+forge verify-contract <LatheReads address> src/LatheReads.sol:LatheReads --verifier oklink --verifier-url <same url> --etherscan-api-key $OKLINK_KEY --watch
+```
+
+The constructor arguments of `LatheOrders` may also be needed (`--constructor-args $(cast abi-encode "constructor(address,address,address,uint16)" <factory> <usdt> <fee recipient> <fee bps>)`).
 
 ## 4. Smoke run on testnet
 
@@ -109,6 +124,8 @@ Every order must name its builder (`createOrder` reverts `BuilderRequired` for t
 
 All six steps must behave as described before mainnet.
 
+After the libraries split (2026-11-21), `DeployTestnet.s.sol` then `Smoke.s.sol` ran again on a local anvil (chain id 1952): the broadcast held the two library deploys (CREATE2) before the mocks and `LatheOrders`, and the smoke run gave the same results. `Deploy.s.sol` was dry-run on a mainnet fork (`--fork-url`, nothing sent): three transactions, the two libraries and `LatheOrders`.
+
 Checked end to end on a local anvil (chain id 1952, `DeployTestnet.s.sol` then `Smoke.s.sol` with anvil's unlocked default account) on 2026-11-21: `ONCHAIN EXECUTION COMPLETE & SUCCESSFUL`, orders 1 and 4 Paid, 2, 3 and 5 Open, and the three `cast call` lines above gave the receipt, `flip` / `mem`, and `0x00 0x00`. Not yet run on testnet.
 
 ## 5. Mainnet
@@ -119,7 +136,7 @@ Use a **separate** keystore for mainnet, never the testnet one:
 cast wallet import lathe-mainnet --interactive
 ```
 
-Fund it with a little real OKB on X Layer for gas. The deploy costs about 2.9M gas (about 0.0001 OKB at the dry-run gas price on 2026-11-20).
+Fund it with a little real OKB on X Layer for gas. The deploy is **three transactions**: `LatheChecks`, `LatheReads` (the two linked libraries, see step 3), then `LatheOrders`. Forge's estimate for all three on the 2026-11-21 mainnet-fork dry run was 8,164,147 gas, about 0.00033 OKB at that run's gas price (forge's estimate includes its 1.3x margin; the real use is lower).
 
 Decide two values first. Both are fixed forever once deployed (no owner, no upgrade):
 
@@ -148,7 +165,9 @@ forge script script/Deploy.s.sol \
   --etherscan-api-key $OKLINK_KEY
 ```
 
-The script refuses to run unless the chain is 196, the factory and USDT have code, USDT has 6 decimals, `FEE_RECIPIENT` is not zero and `FEE_BPS` is at most 500. It prints one line: `LatheOrders 0x...`. Record that address and the transaction hash (from `broadcast/Deploy.s.sol/196/run-latest.json`) in `evidence/2026-11-2x-deploy-v0.md`.
+`--verify` also verifies the two libraries, because they are deployed by the same run (not tested; if one is missing on OKLink, use the three `forge verify-contract` commands in step 3 with the `XLAYER` URL). The library addresses are in `broadcast/Deploy.s.sol/196/run-latest.json` under `libraries`; record them with the `LatheOrders` address.
+
+The script refuses to run unless the chain is 196, the factory and USDT have code, USDT has 6 decimals, `FEE_RECIPIENT` is not zero and `FEE_BPS` is at most 500. It prints one line: `LatheOrders 0x...`. Record that address, the two library addresses and the three transaction hashes (from `broadcast/Deploy.s.sol/196/run-latest.json`) in `evidence/2026-11-2x-deploy-v0.md`.
 
 ## Gotcha: give `deliver` explicit gas when using forge scripts
 

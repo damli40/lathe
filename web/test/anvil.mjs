@@ -43,12 +43,26 @@ export function deployMocks(url) {
   return r;
 }
 
-/** forge create, unlocked sender. Returns the deployed address. */
-export function forgeCreate(url, contract, ctorArgs = []) {
+/**
+ * forge create, unlocked sender. Returns the deployed address. `libraries` are "path:Name:0xaddr" strings for the
+ * linked libraries the contract calls (LatheOrders needs LatheChecks and LatheReads; see deployLathe).
+ */
+export function forgeCreate(url, contract, ctorArgs = [], libraries = []) {
   const args = ["create", contract, "--rpc-url", url, "--unlocked", "--from", ANVIL_ACCOUNT0, "--broadcast"];
+  for (const l of libraries) args.push("--libraries", l);
   if (ctorArgs.length) args.push("--constructor-args", ...ctorArgs);
   const out = execFileSync("forge", args, { cwd: REPO, env: forgeEnv(), encoding: "utf8", maxBuffer: 1 << 24 });
   const a = out.match(/Deployed to:\s+(0x[0-9a-fA-F]{40})/)?.[1];
   if (!a) throw new Error("forge create failed:\n" + out);
   return a;
+}
+
+/** Deploy LatheOrders with forge create: its two linked libraries first, then the contract linked to them. */
+export function deployLathe(url, ctorArgs) {
+  const checks = forgeCreate(url, "src/LatheChecks.sol:LatheChecks");
+  const reads = forgeCreate(url, "src/LatheReads.sol:LatheReads");
+  return forgeCreate(url, "src/LatheOrders.sol:LatheOrders", ctorArgs, [
+    `src/LatheChecks.sol:LatheChecks:${checks}`,
+    `src/LatheReads.sol:LatheReads:${reads}`,
+  ]);
 }

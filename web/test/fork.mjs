@@ -5,7 +5,7 @@
 // Run from the repo root: node web/test/fork.mjs
 import { execFileSync } from "node:child_process";
 import { serve, playwright, rpc, shimSource, assert } from "./lib.mjs";
-import { startAnvil, forgeCreate, ANVIL_ACCOUNT0 } from "./anvil.mjs";
+import { startAnvil, forgeCreate, deployLathe, ANVIL_ACCOUNT0 } from "./anvil.mjs";
 import { openTool, connect, createOrder, openOrder, waitStatus, deliver, statusText } from "./flows.mjs";
 
 const FACTORY = "0x1f09DAeFA827f02CBb40967cc91b259763760761";
@@ -20,7 +20,7 @@ try {
   const cast = (...a) => execFileSync("cast", [...a, "--rpc-url", anvil.url], { encoding: "utf8" }).trim();
   assert(cast("chain-id") === "196", "fork reports chain 196");
   const token = forgeCreate(anvil.url, "test/mocks/MockUSDT.sol:MockUSDT");
-  const lathe = forgeCreate(anvil.url, "src/LatheOrders.sol:LatheOrders", [FACTORY, token, ANVIL_ACCOUNT0, "100"]);
+  const lathe = deployLathe(anvil.url, [FACTORY, token, ANVIL_ACCOUNT0, "100"]);
   cast("send", token, "mint(address,uint256)", ANVIL_ACCOUNT0, "1000000000", "--unlocked", "--from", ANVIL_ACCOUNT0);
   const owner = cast("call", XOR_PROC, "ownerOf(uint256)(address)", "1");
   console.log("LatheOrders on fork:", lathe, "mock token:", token, "XOR circuit owner:", owner);

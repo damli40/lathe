@@ -142,11 +142,26 @@ export function feePercent(feeBps) {
 
 // run / runStep (a free eth_call on a paid order): the contract re-checks the circuit (reads and hashes the
 // netlist), then needs the full per-case hold free before the circuit runs, or it reverts InsufficientGasForCase.
+// LatheOrders hands run / runStep to its linked library LatheReads, and that call passes on only 63/64 of the gas
+// (EIP-150), so the total is scaled by 64/63. test/LatheOrders.libs.t.sol checks these figures against the contract.
 export const RUN_OVERHEAD = 300_000n;
+
+const hop = (g) => (g * 64n + 62n) / 63n;
 
 /** Gas to ask for when calling run / runStep on a circuit of `gateCount` gates. */
 export function runGasLimit(c, gateCount) {
-  return RUN_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + perCaseHold(c, gateCount);
+  return hop(RUN_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + perCaseHold(c, gateCount));
+}
+
+/**
+ * Gas to ask for when calling run on a paid pieced order. run checks and runs every piece in turn (piece 0, then
+ * piece 1 on its answer), and each piece's eval needs its own full hold free, so every piece's netlist read and
+ * hold are added. `gateCounts` holds each piece's recorded gate count.
+ */
+export function runPiecedGasLimit(c, gateCounts) {
+  let g = RUN_OVERHEAD;
+  for (const n of gateCounts) g += NETLIST_GAS_PER_GATE * BigInt(n) + perCaseHold(c, n);
+  return hop(g);
 }
 
 /**
