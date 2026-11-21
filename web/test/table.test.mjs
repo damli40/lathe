@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   encodeTable, decodeTable, expected, readBits, pack, toHex, fromHex, tableProblem, byteLength, presetAnswers,
+  cleanName, nameHasControls,
 } from "../table.js";
 
 test("XOR 2 inputs, 1 output = 0x06 (test/LatheBase.sol xorTable, test/fork/XorFork.t.sol)", () => {
@@ -146,4 +147,18 @@ test("memory: shape errors match the contract (test_state_* in LatheOrders.state
   assert.equal(tableProblem(2, 1, new Uint8Array(6), 2), "UnsupportedStateBits");
   assert.equal(tableProblem(6, 1, new Uint8Array(32), 1), "TooManyCases");
   assert.throws(() => encodeTable(6, 1, new Array(128).fill(0), 1));
+});
+
+test("input names: text-direction and control characters are removed for display and refused on the form", () => {
+  // "x1)" + RIGHT-TO-LEFT OVERRIDE would make a header read as another column
+  assert.equal(cleanName("x1)\u202E"), "x1)");
+  for (const ch of ["\u202A", "\u202B", "\u202C", "\u202D", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069", "\u200E", "\u200F", "\u061C", "\u0000", "\u0007", "\t", "\n", "\u007F", "\u0085", "\u009F"]) {
+    assert.equal(cleanName("a" + ch + "b"), "ab", "U+" + ch.codePointAt(0).toString(16));
+    assert.equal(nameHasControls("a" + ch), true, "U+" + ch.codePointAt(0).toString(16));
+  }
+  assert.equal(cleanName("fault"), "fault");
+  assert.equal(cleanName("故障 reset"), "故障 reset");
+  assert.equal(nameHasControls("故障 reset"), false);
+  assert.equal(nameHasControls(""), false);
+  assert.equal(cleanName(null), "");
 });

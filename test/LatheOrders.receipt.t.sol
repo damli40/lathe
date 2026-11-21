@@ -55,15 +55,31 @@ contract LatheOrdersReceiptTest is LatheBase {
         uint256 id = createXor();
         vm.roll(1234);
         vm.expectEmit(true, false, false, true);
-        emit LatheOrders.Receipt(id, address(proc), XOR_ID, keccak256(xorTable()));
+        emit LatheOrders.Receipt(id, address(proc), XOR_ID, keccak256(abi.encodePacked(uint8(2), uint8(1), uint8(0), xorTable())));
         vm.prank(builder);
         lathe.deliver(id, address(proc), XOR_ID);
         (address p, uint256 c, bytes32 h, uint64 b) = lathe.receipts(id);
         assertEq(p, address(proc));
         assertEq(c, XOR_ID);
-        assertEq(h, keccak256(xorTable()));
-        assertEq(h, keccak256(lathe.tableOf(id)));
+        assertEq(h, keccak256(abi.encodePacked(uint8(2), uint8(1), uint8(0), xorTable())), "shape, then table");
         assertEq(b, 1234);
+    }
+
+    /// The same table bytes under a different shape are a different rule, so they get a different fingerprint.
+    /// 0x06 is XOR for 2 inputs / 1 output, and answers 2,1,0,0 for 2 inputs / 2 outputs.
+    function test_receipt_fingerprintCoversShape() public {
+        uint256 a = paidXor();
+        setCircuitFromTable(7, builder, 2, 2, hex"06", SMALL_GATES);
+        vm.prank(buyer);
+        uint256 b = lathe.createOrder(2, 2, hex"06", AMOUNT, uint64(block.timestamp + 1 days), builder, 0);
+        vm.prank(builder);
+        lathe.deliver(b, address(proc), 7);
+        assertEq(uint8(status(b)), uint8(LatheOrders.Status.Paid));
+        assertEq(keccak256(lathe.tableOf(a)), keccak256(lathe.tableOf(b)), "same table bytes");
+        (,, bytes32 ha,) = lathe.receipts(a);
+        (,, bytes32 hb,) = lathe.receipts(b);
+        assertTrue(ha != hb, "different shapes, different fingerprints");
+        assertEq(hb, keccak256(abi.encodePacked(uint8(2), uint8(2), uint8(0), hex"06")));
     }
 
     function test_receipt_storedOnBatchedPay() public {

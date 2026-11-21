@@ -10,6 +10,14 @@
 //       run with the node's 50M gas (InsufficientGasForCase), so a capped call cannot return an answer;
 //   (g) the node cuts run's gas to 150,000, below what XOR's one case must hold (about 182,000): the page shows an
 //       error, not an answer.
+//   (h) every answer through a proxy that holds each reply for 1.5 s: while run is out the switches are off, so a
+//       flip cannot land; a flip that gets through anyway (switch forced back on) drops the answer; a reload
+//       while run is out drops it; a flip after an answer clears it; the deliver box's processor and circuit boxes
+//       are off while "Read circuit" is out;
+//   (i) names are bytes: "x1)" + U+202E (right-to-left override) is shown as "x1)" inside <bdi>, then "(x0)"
+//       outside it, with no direction control left on the page; the create form refuses such a name;
+//   (j) mainnet has no contract address: ?receipt=1, ?order=1 and the create form show "Not on mainnet yet" and
+//       nothing says it is loading.
 // Run from the repo root: node web/test/receipt.mjs
 import { execFileSync } from "node:child_process";
 import { serve, playwright, shimSource, assert } from "./lib.mjs";
@@ -94,7 +102,7 @@ try {
   await openTool(vp, `${server.url}?lang=en&receipt=${A}`);
   await vp.waitForSelector("#receipt-facts", { timeout: T_LONG });
   assert(new URL(vp.url()).searchParams.get("receipt") === A, "the URL keeps ?receipt=");
-  assert((await vp.locator("#receipt-hash").textContent()) === "Matches the table below.", "table fingerprint matches");
+  assert((await vp.locator("#receipt-hash").textContent()) === "Matches the table below.", "table fingerprint (shape + table) matches the contract's");
   assert(/names the same processor and circuit/.test(await vp.locator("#receipt-rule").textContent()), "ruleOf agrees with the receipt");
   const rows = await vp.locator("#try-box tbody th").allTextContents();
   assert(rows.join(",") === "a (x0),b (x1)", `names are the row headers: ${rows.join(",")}`);
@@ -143,8 +151,90 @@ try {
   const capMsg = await vp.locator("#run-result").textContent();
   assert(/refused to answer/.test(capMsg) && !(await vp.locator("#run-check").count()), `capped call is an error, not an answer: "${capMsg}"`);
 
+  console.log("(h) an answer never sits next to inputs it was not asked for");
+  const bitsNow = async () => (await vp.locator("#try-box button.bit").allTextContents()).join(",");
+  const runBit0 = vp.locator('#try-box button.bit[data-k="0"]');
+  const waitRunOut = () => vp.waitForFunction(() => document.querySelector("#run-btn")?.disabled, null, { timeout: T_LONG });
+  const waitRunBack = () => vp.waitForFunction(() => document.querySelector("#run-btn") && !document.querySelector("#run-btn").disabled, null, { timeout: T_LONG });
+  await vp.goto(`${server.url}?lang=en&receipt=${A}`);
+  await vp.waitForSelector("#run-btn", { timeout: T_LONG });
+  await runBit0.click(); // x0 = 1
+  proxy.st.delay = 1500;
+  await vp.click("#run-btn");
+  await waitRunOut();
+  assert(await runBit0.isDisabled(), "the switches are off while run is out");
+  await runBit0.click({ force: true, timeout: 2000 }).catch(() => {}); // the click the review made: flip x0 back
+  await vp.waitForSelector("#run-result", { timeout: T_LONG });
+  assert((await bitsNow()) === "1,0", `the switches still show the inputs that were run: ${await bitsNow()}`);
+  assert((await vp.locator("#run-result").textContent()) === "The circuit answered y0=1.", "answer for 1,0");
+  assert((await vp.locator("#run-check").textContent()) === "The table says the same for case 1.", "case 1");
+  await runBit0.click(); // a change after the answer clears it
+  assert((await vp.locator("#run-result").count()) === 0 && (await vp.locator("#run-check").count()) === 0, "a flip after the answer clears it");
+  // second guard: a switch forced back on and flipped while run is out; the answer that comes back is dropped
+  await runBit0.click(); // x0 = 1 again
+  await vp.click("#run-btn");
+  await waitRunOut();
+  await runBit0.evaluate((b) => { b.disabled = false; });
+  await runBit0.click();
+  await waitRunBack();
+  assert((await bitsNow()) === "0,0" && (await vp.locator("#run-result").count()) === 0, `answer for 1,0 dropped when the inputs became ${await bitsNow()}`);
+  // a reload while run is out: the answer belongs to the old view and is dropped
+  await runBit0.click(); // x0 = 1
+  await vp.click("#run-btn");
+  await waitRunOut();
+  await vp.click("#receipt-refresh");
+  await vp.waitForSelector("#run-btn:not([disabled])", { timeout: T_LONG });
+  await vp.waitForTimeout(2000); // the old run's reply has come back by now
+  assert((await vp.locator("#run-result").count()) === 0, "a reload while run is out drops its answer");
+  // same rule on the deliver box: the processor and circuit boxes are off while "Read circuit" is out
+  await openOrder(page, C);
+  await page.fill("#f-circ", "1");
+  await page.click("#read-circuit");
+  await page.waitForFunction(() => document.querySelector("#read-circuit")?.disabled, null, { timeout: T_LONG });
+  assert(await page.locator("#f-circ").isDisabled() && await page.locator("#f-proc").isDisabled(), "deliver inputs are off while the circuit is read");
+  proxy.st.delay = 0;
+  await page.waitForSelector("#deliver-box table.cmp", { timeout: T_LONG });
+  assert(await page.locator("#f-circ").isEnabled() && (await page.locator("#f-circ").inputValue()) === "1", "and back on, still showing circuit 1, once the read-out is in");
+
+  console.log("(i) a name with a text-direction control");
+  await page.click("#tab-create");
+  await page.fill("#f-label-0", "a\u202E");
+  assert(/text-direction/.test(await page.locator("#labels-err").textContent()), "the create form refuses a direction control in a name");
+  assert(await page.locator("#create-btn").isDisabled(), "and create stays off");
+  await page.fill("#f-label-0", "");
+  const rlo = "0x" + Buffer.from("x1)\u202E", "utf8").toString("hex").padEnd(64, "0");
+  const zero = "0x" + "0".repeat(64);
+  send(addrs.token, "approve(address,uint256)", addrs.lathe, "1000000");
+  send(addrs.lathe, "createOrder(uint8,uint8,bytes,uint96,uint64,address,uint32,bytes32[])", "2", "1", "0x06", "1000000", deadline, ANVIL_ACCOUNT0, "0", `[${rlo},${zero}]`);
+  const E = String(BigInt(cast("call", addrs.lathe, "nextOrderId()(uint256)").split(" ")[0]) - 1n);
+  assert(cast("call", addrs.lathe, "labelsOf(uint256)(bytes32[])", E).includes(rlo), `order ${E} stores the name with U+202E`);
+  send(addrs.lathe, "deliver(uint256,address,uint256)", E, addrs.processor, "1");
+  await vp.goto(`${server.url}?lang=en&receipt=${E}`);
+  await vp.waitForSelector("#try-box", { timeout: T_LONG });
+  const th0 = vp.locator("#try-box tbody th").first();
+  assert((await th0.textContent()) === "x1) (x0)" && (await th0.locator("bdi").textContent()) === "x1)", `row header: "${await th0.textContent()}"`);
+  const colTh = vp.locator("#order-view table.tt thead th").nth(1);
+  assert((await colTh.textContent()) === "x1) (x0)" && (await colTh.locator("bdi").count()) === 1, `column header: "${await colTh.textContent()}"`);
+  assert(!/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/.test(await vp.locator("#order-view").textContent()), "no direction control left in the view");
+
+  console.log("(j) mainnet has no contract address");
+  const mctx = await browser.newContext({ bypassCSP: true, viewport: { width: 1440, height: 900 } });
+  await mctx.addInitScript({ content: cfg });
+  const mp = await mctx.newPage();
+  mp.on("pageerror", (e) => errors.push(e.message));
+  for (const q of ["receipt=1", "order=1", ""]) {
+    await mp.goto(`${server.url}?lang=en&net=mainnet${q ? "&" + q : ""}`);
+    await mp.waitForSelector("#tool-notice:not([hidden])", { timeout: T_LONG });
+    await mp.waitForTimeout(500);
+    assert(/Not on mainnet yet/.test(await mp.locator("#tool-notice").textContent()), `?${q || "(create)"}: the notice says not on mainnet yet`);
+    const body = await mp.locator("#tool-body").textContent();
+    assert(!/Loading/i.test(body), `?${q || "(create)"}: nothing says it is loading`);
+    assert((await mp.locator("#tool-body [aria-busy='true']").count()) === 0 && (await mp.locator("#order-view[aria-busy]").count()) === 0, `?${q || "(create)"}: nothing is marked busy`);
+  }
+  await mctx.close();
+
   assert(errors.length === 0, "no page errors" + (errors.length ? ": " + errors.join(" | ") : ""));
-  console.log("RECEIPT PASS: names, receipts, ruleOf, run and runStep with no wallet, capped calls refused");
+  console.log("RECEIPT PASS: names, receipts, ruleOf, run and runStep with no wallet, capped calls refused, stale answers dropped, direction controls removed, mainnet without a contract");
 } catch (e) {
   console.error("RECEIPT FAIL:", e.message);
   process.exitCode = 1;

@@ -186,3 +186,19 @@ export const STATE_PRESETS = {
     return next | (next << nOut);
   },
 };
+
+// ---------------------------------------------------------------- input names
+// Names are arbitrary bytes on chain. Text-direction controls (U+202A..U+202E embeddings and overrides,
+// U+2066..U+2069 isolates, U+200E / U+200F / U+061C marks) can make a header read as another column, for example
+// "x1)" followed by U+202E. These and the other control characters (C0, DEL, C1) are what NAME_CONTROLS matches.
+export const NAME_CONTROLS = /[\u0000-\u001F\u007F-\u009F؜‎‏‪-‮⁦-⁩]/g;
+
+/** A name as the page shows it: control and text-direction characters removed. */
+export function cleanName(s) {
+  return typeof s === "string" ? s.replace(NAME_CONTROLS, "") : "";
+}
+
+/** True when the create form must refuse the name (it holds a character cleanName would remove). */
+export function nameHasControls(s) {
+  return typeof s === "string" && s.replace(NAME_CONTROLS, "") !== s;
+}

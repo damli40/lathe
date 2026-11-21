@@ -43,6 +43,7 @@ Not yet tested: a contract calling a circuit chosen at claim time inside one tra
 - Who can change the circuit runner: the processor factory is owned by a 3-of-5 multisig and is not sealed; the circuit beacon's owner is the zero address (read-only check, Nov 15 2026). We have not audited every upgrade path, so Lathe pins and inspects the exact processor before any order takes money.
 - Lathe takes a fee on each paid order. Rate not set.
 - Every order names its builder. Open orders, where any builder may deliver, come after Dec 7: an open order lets anyone mint a copy of the honest builder's circuit, or wrap it, and deliver first.
+- A processor that returns badly encoded data (from `eval`, `step`, `circuitInfo` or `netlist`) makes `check` revert instead of counting a wrong answer. A delivered order then cannot finish its check: it waits until one day after its deadline, and then the buyer gets a refund. Only TapeOut's factory owners, who can change the processor code, could cause this. A builder cannot: a builder only picks a circuit, not the code that runs it.
 
 ## Roadmap to Dec 7
 

@@ -60,13 +60,21 @@ Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mon
   The contract checks these orders with the circuit's `step` function instead of `eval`.
 - Input names: optional, one per input and one for the memory bit, up to 32 bytes each, stored on chain as
   `bytes32` (`labelsOf`). With no names the page uses the label-less `createOrder` / `createStatefulOrder`.
+  Names are arbitrary bytes, so the page removes control and text-direction characters when it reads them
+  (`cleanName` in `table.js`), shows each name inside `<bdi>` and keeps the column code (`x0`, `s`) outside it, so
+  no name can make a header read as another column. The create form refuses a name holding such characters.
 - Receipt view, `?receipt=N`: needs no wallet. It shows what the contract wrote at payout (processor, circuit,
-  table fingerprint, block), checks the fingerprint against the stored table and `ruleOf` against the receipt,
-  and lets a visitor run the paid circuit (`run`, or `runStep` with memory) as a free `eth_call`. The call asks for
+  table fingerprint, block), checks the fingerprint against the stored table and shape (the contract hashes
+  `abi.encodePacked(nIn, nOut, nState, table)`) and `ruleOf` against the receipt, and lets a visitor run the paid circuit (`run`, or `runStep` with memory) as a free `eth_call`. The call asks for
   `RUN_OVERHEAD + netlist + one case's hold` gas (`gas.js`). If that is above the 48M the page keeps under the
   public node's cap, the page says so and does not call. If a node gives the call less gas anyway, the contract
   reverts `InsufficientGasForCase` and the page shows that as an error. It never shows an answer it did not get
-  in full.
+  in full. While a call is out the 0/1 switches are off; an answer that comes back after the view changed (reload,
+  another order, another network) or for switches that no longer match is dropped, and any change to a switch
+  clears the shown answer. The deliver box's processor and circuit boxes are off the same way while a read-out
+  or a delivery is out.
+- A network with no contract address (mainnet today) shows "Not on mainnet yet" for every link (`?receipt=N`,
+  `?order=N`, the create form) and nothing that says it is loading.
 - Claim fees is left out on purpose: `claimFees()` sends fees to the fixed fee recipient, so it is no use to a visitor.
 - Explorer links: none. When checked on 2026-11-21, neither OKLink nor the OKX explorer resolved a known chain-1952
   transaction, so hashes are shown as copyable text. Set `explorerTx` in `config.js` once a format is confirmed.
@@ -109,7 +117,9 @@ node web/test/memory.mjs
 # 8. Receipts and input names on a local anvil, through the 50M-cap proxy: named XOR and toggle orders paid; with
 #    no wallet, ?receipt=N shows the receipt, checks the table fingerprint and ruleOf, uses the names as row
 #    headers, and runs run / runStep on chain; an unpaid order has no receipt; a 4,000-gate circuit is not run
-#    (and the contract refuses run at 50M gas); a run call cut to 150,000 gas shows an error, not an answer
+#    (and the contract refuses run at 50M gas); a run call cut to 150,000 gas shows an error, not an answer;
+#    with every reply held 1.5 s: switches off while run is out, stale answers dropped; a name with U+202E shown
+#    without it inside <bdi> and refused on the form; mainnet with no address shows the notice, never "Loading"
 node web/test/receipt.mjs
 ```
 

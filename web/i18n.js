@@ -117,6 +117,7 @@ const tool = {
         maxGates: "Enter a whole number from 0 to 4294967295.",
         outputs: "Enter a whole number from 1 to {max}.",
         label: "Names can be up to 32 bytes. This one is {n}.",
+        labelChars: "Names cannot hold control or text-direction characters (they can make a name read as another column). Remove them and type the name again.",
       },
     },
     lookup: {
@@ -414,6 +415,7 @@ const tool = {
         maxGates: "填写 0 到 4294967295 之间的整数。",
         outputs: "填写 1 到 {max} 之间的整数。",
         label: "名称最多 32 字节，这个是 {n} 字节。",
+        labelChars: "名称不能包含控制字符或文字方向字符（它们会让名称看起来像另一列）。请删除后重新输入。",
       },
     },
     lookup: {

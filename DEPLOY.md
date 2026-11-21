@@ -66,7 +66,7 @@ Not tested end to end. If it fails, try `xlayer_testnet` in lowercase, or verify
 Paste the addresses from step 3 into this command:
 
 ```sh
-LATHE=0x... USDT=0x... PROCESSOR=0x... XOR_ID=1 WRONG_ID=2 \
+LATHE=0x... USDT=0x... PROCESSOR=0x... XOR_ID=1 WRONG_ID=2 TOGGLE_ID=3 WRONG_TOGGLE_ID=4 \
 forge script script/Smoke.s.sol \
   --rpc-url https://testrpc.xlayer.tech/terigon \
   --account lathe-testnet --broadcast
@@ -79,6 +79,23 @@ What it does and what you should see:
 | (a) | Creates an order for 2-input XOR (1 mUSDT) naming you as the builder, delivers the honest circuit | `order id 1 status 2` (2 = Paid). Small circuits are checked inside `deliver`, so it pays in the same transaction |
 | (b) | Creates a second order, then tries the wrong circuit | `deliver reverts WrongAnswer(3)`, `order id 2 status 0` (0 = Open). Case 3 is 1 XOR 1, where the wrong circuit says 1 |
 | (c) | Creates a third order with a 5-minute deadline | `order id 3 status 0`, plus the exact `cast send ... refund` command |
+| (d) | Creates a memory order (1 input, 1 output, 1 memory bit, table `0x3c`) with input names `flip` and `mem`, delivers the honest toggle circuit 3 | `order id 4 status 2` (Paid in the same transaction) |
+| (e) | Creates a second memory order, then tries the wrong toggle circuit 4 | `deliver reverts WrongAnswer(3)` (simulated, not sent), `order id 5 status 0`. Case 3 is x0 = 1 with memory 1, where circuit 4 keeps the memory at 1 instead of 0 |
+| (f) | Reads the two paid orders (1 and 4): `receipts`, `ruleOf`, `labelsOf`, then `run` on all 4 XOR cases and `runStep` on all 4 toggle cases | `receipt + ruleOf ok for order 1` and `... order 4`, `labelsOf: (a) none, (d) flip, mem`, `run(a): ...`, `runStep(d): ...`. Any wrong answer stops the script with a `Smoke (f): ...` message |
+
+Every transaction (orders 1 to 5 and the two deliveries) is sent before the simulated wrong deliveries in (b) and (e). A pranked call from your account uses up one of its nonces in forge's simulation, so a transaction queued after it went out with a nonce the chain skipped (seen on the local anvil run: "provider nonce is still behind expected nonce").
+
+The (f) reads and the `run` / `runStep` calls are free reads that forge runs in its simulation of the same transactions; they are never sent. `run` and `runStep` get an explicit 1,000,000 gas: like `check`, they refuse (`InsufficientGasForCase`) unless they can give the circuit its whole per-case budget. To confirm on chain afterwards:
+
+```sh
+cast call <LATHE> 'receipts(uint256)(address,uint256,bytes32,uint64)' 4 --rpc-url https://testrpc.xlayer.tech/terigon
+cast call <LATHE> 'labelsOf(uint256)(bytes32[])' 4 --rpc-url https://testrpc.xlayer.tech/terigon
+cast call <LATHE> 'runStep(uint256,bytes,bytes)(bytes,bytes)' 4 0x01 0x01 --gas-limit 1000000 --rpc-url https://testrpc.xlayer.tech/terigon
+```
+
+The last one is memory 1 with input 1: it must print `0x00` twice (new memory 0, output 0).
+
+The receipt's fingerprint (third value) is `keccak256(abi.encodePacked(nIn, nOut, nState, table))`, so it covers the order's shape as well as its table bytes.
 
 About (b): `forge` will not send a transaction it knows will revert, so the wrong delivery is **simulated** and its error checked, not sent. If you want a failed transaction on chain as evidence, the script prints a `cast send ... --gas-limit 1000000` command that sends it anyway. That transaction will show as failed on OKLink, and order 2 stays Open.
 
@@ -88,9 +105,11 @@ Order 2's 1 mUSDT can also be refunded with the same command and id 2, but only 
 
 **Where to paste the results:** create `evidence/2026-11-2x-testnet-v0.md` (use the real date) with the six addresses from step 3 and every transaction hash. The hashes are in `broadcast/DeployTestnet.s.sol/1952/run-latest.json` and `broadcast/Smoke.s.sol/1952/run-latest.json` (field `hash`), plus the `cast send` outputs for the refund and the optional failed delivery. The `broadcast/` folder is git-ignored, so copy the hashes into the evidence file. Add a line to `evidence/README.md`. Say in the file that testnet ran on mocks.
 
-Every order must name its builder (`createOrder` reverts `BuilderRequired` for the zero address). The smoke run names the broadcasting account, which also owns both mock circuits.
+Every order must name its builder (`createOrder` reverts `BuilderRequired` for the zero address). The smoke run names the broadcasting account, which also owns the four mock circuits.
 
-All three steps must behave as described before mainnet.
+All six steps must behave as described before mainnet.
+
+Checked end to end on a local anvil (chain id 1952, `DeployTestnet.s.sol` then `Smoke.s.sol` with anvil's unlocked default account) on 2026-11-21: `ONCHAIN EXECUTION COMPLETE & SUCCESSFUL`, orders 1 and 4 Paid, 2, 3 and 5 Open, and the three `cast call` lines above gave the receipt, `flip` / `mem`, and `0x00 0x00`. Not yet run on testnet.
 
 ## 5. Mainnet
 

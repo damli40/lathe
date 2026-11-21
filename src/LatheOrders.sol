@@ -49,7 +49,7 @@ contract LatheOrders is ReentrancyGuard {
     struct PaidReceipt {
         address processor;
         uint256 circuitId;
-        bytes32 tableHash; // keccak256(tableOf[orderId])
+        bytes32 tableHash; // keccak256(abi.encodePacked(nIn, nOut, nState, tableOf[orderId])), see _writeReceipt
         uint64 blockNumber;
     }
 
@@ -403,12 +403,16 @@ contract LatheOrders is ReentrancyGuard {
         usdt.safeTransfer(payee, o.amount - fee);
     }
 
-    /// @dev Written once, at payout, before the transfer.
+    /// @dev Written once, at payout, before the transfer. The fingerprint covers the order's shape as well as the
+    /// table bytes: the same bytes mean a different rule under a different shape (0x06 is XOR for 2 inputs and 1
+    /// output, something else for 2 inputs and 2 outputs). nIn, nOut, nState are uint8, so this hashes 3 bytes and
+    /// then the table.
     function _writeReceipt(uint256 orderId, Delivery storage d) internal {
         PaidReceipt storage r = receipts[orderId];
+        Order storage o = orders[orderId];
         r.processor = d.processor;
         r.circuitId = d.circuitId;
-        r.tableHash = keccak256(tableOf[orderId]);
+        r.tableHash = keccak256(abi.encodePacked(o.nIn, o.nOut, o.nState, tableOf[orderId]));
         r.blockNumber = uint64(block.number);
         emit Receipt(orderId, r.processor, r.circuitId, r.tableHash);
     }

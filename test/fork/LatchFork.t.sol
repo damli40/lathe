@@ -64,4 +64,27 @@ contract LatchForkTest is Test {
         assertTrue(ok, "step within the budget");
         assertEq(got, 3);
     }
+
+    /// @dev test_fork_inContractStep cannot tell `state` from `inputs`: the latch has no inputs and the processor
+    /// reads short bytes as zeros, so the call above gives the same answer with the two swapped. These two probes
+    /// do tell them apart, through IProcessor (the interface LatheOrders calls):
+    /// - step(1, state 0x01, inputs empty) = (0x02, 0x00): a 1 in the SECOND argument changes the answer, so the
+    ///   second argument is the memory (the latch has no inputs to read);
+    /// - step(1, state empty, inputs 0x01) = (0x01, 0x01): the same 1 in the THIRD argument changes nothing (it is
+    ///   the state-0 answer), so the third argument is the inputs, which this circuit ignores;
+    /// - the first returned value moves with the memory given (0x01 from memory 0, 0x02 from memory 1) while the
+    ///   output bit does not, so the first returned value is the new memory and the second is the outputs, the
+    ///   order _stepAnswer and runStep assume.
+    /// A real circuit with both inputs and memory would be a stronger check; none was found in a scan of 50
+    /// processors, so the order is pinned on this latch only. Both probes checked with read-only calls at the
+    /// fork block (2026-11-21).
+    function test_fork_stepArgumentOrder() public view {
+        (bytes memory ns, bytes memory out) = IProcessor(LATCH_PROC).step(LATCH_ID, hex"01", hex"");
+        assertEq(ns, hex"02", "memory 1 in the state argument: new memory 2");
+        assertEq(out, hex"00", "memory 1 in the state argument: output 0");
+
+        (ns, out) = IProcessor(LATCH_PROC).step(LATCH_ID, hex"", hex"01");
+        assertEq(ns, hex"01", "a 1 in the inputs argument is ignored: same new memory as memory 0");
+        assertEq(out, hex"01", "a 1 in the inputs argument is ignored: same output as memory 0");
+    }
 }

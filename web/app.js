@@ -138,23 +138,36 @@ function inputsLabel(c, nIn, nState = 0) {
 }
 // ---------------------------------------------------------------- input names (labels)
 // Stored on chain as one bytes32 per input, then one for the memory bit; empty means "no name, show x0".
+// Names are arbitrary bytes, so control and text-direction characters are removed on the way in (T.cleanName),
+// and a shown name sits inside a <bdi> with the column code outside it: nothing in a name can reorder the code.
 const utf8 = new TextEncoder();
 function decodeLabels(arr) {
   if (!Array.isArray(arr)) return [];
   return arr.map((h) => {
     if (typeof h !== "string" || /^0x0{64}$/i.test(h)) return "";
     try {
-      return state.viem.hexToString(h, { size: 32 });
+      return T.cleanName(state.viem.hexToString(h, { size: 32 }));
     } catch {
       return "";
     }
   });
 }
-// Header text for case bit k (inputs x0.., then the memory bit s) with an optional name.
+function colCode(k, nIn) {
+  return k < nIn ? `x${k}` : "s";
+}
+// Header text for case bit k (inputs x0.., then the memory bit s) with an optional name. Plain text, for
+// aria-labels; headers on screen use colHeadNode.
 function colHead(labels, k, nIn) {
-  const code = k < nIn ? `x${k}` : "s";
-  const name = labels?.[k];
-  return name ? `${name} (${code})` : code;
+  const name = T.cleanName(labels?.[k]);
+  return name ? `${name} (${colCode(k, nIn)})` : colCode(k, nIn);
+}
+// The same header as nodes: the name isolated in <bdi>, then " (x0)" outside it.
+function colHeadNode(labels, k, nIn) {
+  const name = T.cleanName(labels?.[k]);
+  if (!name) return document.createTextNode(colCode(k, nIn));
+  const f = document.createDocumentFragment();
+  f.append(el("bdi", { class: "name", text: name }), ` (${colCode(k, nIn)})`);
+  return f;
 }
 
 function sameAddr(a, b) {
@@ -782,6 +795,12 @@ function renderCreate() {
   let sk = $("#create-skeleton");
   if (!ready) {
     form.hidden = true;
+    // The placeholder is only for a network that is still loading; with no contract (or a failed load) it would
+    // say "busy" for ever under the notice.
+    if (toolStatus.phase !== "loading") {
+      sk?.remove();
+      return;
+    }
     if (!sk) {
       sk = el("div", { id: "create-skeleton", class: "create", "aria-busy": "true" },
         el("div", { class: "create-fields" }, ...[0, 1, 2, 3, 4].map(() => el("div", { class: "field" }, el("div", { class: "sk sk-line" }), el("div", { class: "sk sk-block" })))),
@@ -857,6 +876,7 @@ function readLabels() {
   const names = formLabels();
   if (names.every((x) => !x)) return { value: [] };
   for (const x of names) {
+    if (T.nameHasControls(x)) return { error: "labelChars" };
     const n = utf8.encode(x).length;
     if (n > 32) return { error: "label", n };
   }
@@ -1012,8 +1032,8 @@ function buildTable(nIn, nOut, answers, { editable, failedCase = null, nState = 
   const cases = T.caseCount(nIn, nState);
   const fc = state.form.focusCell && state.form.focusCell.c < cases && state.form.focusCell.k < w ? state.form.focusCell : { c: 0, k: 0 };
   const head = el("tr", {}, el("th", { class: "case", scope: "col", text: txt("tool.create.colCase") }));
-  for (let k = 0; k < nIn; k++) head.appendChild(el("th", { scope: "col", class: k === 0 ? "sep" : null, text: colHead(labels, k, nIn) }));
-  for (let k = 0; k < nState; k++) head.appendChild(el("th", { scope: "col", class: k === 0 && nIn === 0 ? "sep" : null, text: colHead(labels, nIn + k, nIn) }));
+  for (let k = 0; k < nIn; k++) head.appendChild(el("th", { scope: "col", class: k === 0 ? "sep" : null }, colHeadNode(labels, k, nIn)));
+  for (let k = 0; k < nState; k++) head.appendChild(el("th", { scope: "col", class: k === 0 && nIn === 0 ? "sep" : null }, colHeadNode(labels, nIn + k, nIn)));
   for (let k = 0; k < nOut; k++) head.appendChild(el("th", { scope: "col", class: k === 0 ? "sep" : null, text: `y${k}` }));
   for (let k = 0; k < nState; k++) head.appendChild(el("th", { scope: "col", class: "sep", text: "s′" }));
   if (failedCase !== null) head.appendChild(el("th", { scope: "col" }));
@@ -1114,7 +1134,7 @@ function validateAll(show = true) {
     showErr("builder", b.error ? txt("tool.create.errors.builder." + b.error) : "");
     showErr("maxgates", g.error ? txt("tool.create.errors.maxGates") : "");
     showErr("nout", o.error ? txt("tool.create.errors.outputs", { max: maxOutputs() }) : "");
-    setText("#labels-err", lb.error ? txt("tool.create.errors.label", { n: lb.n }) : "");
+    setText("#labels-err", lb.error ? txt("tool.create.errors." + lb.error, { n: lb.n }) : "");
   }
   const ok = !a.error && !d.error && !b.error && !g.error && !o.error && !lb.error && o.value === state.form.nOut;
   return { ok, amount: a.value, deadline: d.value, builder: b.value, maxGates: g.value, labels: lb.value || [] };
@@ -1456,6 +1476,7 @@ function renderOrderEmpty() {
 let orderSeq = 0;
 async function loadOrder(id, keep = {}) {
   const seq = ++orderSeq;
+  const key = state.netKey; // a result read for another network is dropped, like one for another order
   const prev = state.view && state.view.id === id ? state.view : null;
   const inputs = prev?.inputs || { processor: net().processor || "", circuit: net().mockMint ? "1" : "", n: "" };
   inputs.n = ""; // S4: the check count is worked out again from the re-read progress on every load
@@ -1512,12 +1533,12 @@ async function loadOrder(id, keep = {}) {
         }
       }
     }
-    if (seq !== orderSeq) return;
+    if (seq !== orderSeq || state.netKey !== key) return;
     state.view.data = data;
     state.view.loading = false;
     if (typeof keep.after === "function") state.view.lastAction = keep.after(data);
   } catch (e) {
-    if (seq !== orderSeq) return;
+    if (seq !== orderSeq || state.netKey !== key) return;
     state.view.loading = false;
     state.view.error = explain(e, { read: true }).text;
   }
@@ -1571,9 +1592,13 @@ function leftText(o, now) {
 function renderOrder() {
   const box = clear($("#order-view"));
   const v = state.view;
-  if (!v) return renderOrderEmpty();
   box.removeAttribute("data-status");
   box.removeAttribute("data-view");
+  box.removeAttribute("aria-busy");
+  // No contract on this network (mainnet today), or it failed to load: the tool notice says so and offers the way
+  // on. Nothing is loading here, so the order view stays empty instead of showing "Loading order N" for ever.
+  if (toolStatus.phase !== "ready" && toolStatus.phase !== "loading") return;
+  if (!v) return renderOrderEmpty();
   if (v.loading && !v.data) {
     box.setAttribute("aria-busy", "true");
     box.append(
@@ -1585,7 +1610,6 @@ function renderOrder() {
     );
     return;
   }
-  box.removeAttribute("aria-busy");
   if (v.error) {
     box.append(el("div", { class: "notice is-error" }, el("p", { text: v.error }),
       el("button", { type: "button", class: "btn btn-ghost", text: txt("tool.load.retry"), on: { click: () => loadOrder(v.id) } })));
@@ -1684,8 +1708,9 @@ function deliverBox(o, now) {
     box.append(el("p", { class: "help", text: txt("tool.deliver.closed") }));
     return box;
   }
-  const procIn = el("input", { class: "input mono", id: "f-proc", type: "text", autocomplete: "off", spellcheck: "false", "aria-describedby": "proc-help", value: v.inputs.processor });
-  const circIn = el("input", { class: "input mono", id: "f-circ", type: "text", inputmode: "numeric", autocomplete: "off", "aria-describedby": "circ-help circ-err", value: v.inputs.circuit });
+  // Off while a read or a delivery is out, so its read-out never sits next to a different processor or circuit.
+  const procIn = el("input", { class: "input mono", id: "f-proc", type: "text", autocomplete: "off", spellcheck: "false", "aria-describedby": "proc-help", value: v.inputs.processor, disabled: !!v.busy });
+  const circIn = el("input", { class: "input mono", id: "f-circ", type: "text", inputmode: "numeric", autocomplete: "off", "aria-describedby": "circ-help circ-err", value: v.inputs.circuit, disabled: !!v.busy });
   procIn.addEventListener("input", () => {
     v.inputs.processor = procIn.value.trim();
     v.preview = null;
@@ -1773,6 +1798,7 @@ async function readCircuit(o) {
   const v = state.view;
   const inp = parseDeliverInputs();
   if (!inp) return renderOrder();
+  const asked = v.inputs.processor + "|" + v.inputs.circuit;
   v.busy = "read";
   v.msgs.deliver = null;
   renderOrder();
@@ -1803,6 +1829,12 @@ async function readCircuit(o) {
     v.msgs.deliver = { err: true, text: explain(e, { read: true }).text };
   }
   v.busy = false;
+  if (state.view !== v) return;
+  // The boxes are off while the read is out; if they changed anyway, this read-out is for other inputs.
+  if (v.inputs.processor + "|" + v.inputs.circuit !== asked) {
+    v.preview = null;
+    v.msgs.deliver = null;
+  }
   renderOrder();
 }
 
@@ -1888,7 +1920,7 @@ function checkBox(o, d, now) {
   const fit = Number(G.maxCasesPerCheck(i, d.gateCount));
   const maxN = Math.max(1, Math.min(remaining, fit));
   if (!v.inputs.n || Number(v.inputs.n) > maxN) v.inputs.n = String(maxN);
-  const nIn = el("input", { class: "input mono", id: "f-checkn", type: "text", inputmode: "numeric", autocomplete: "off", "aria-describedby": "checkn-help checkn-err", value: v.inputs.n });
+  const nIn = el("input", { class: "input mono", id: "f-checkn", type: "text", inputmode: "numeric", autocomplete: "off", "aria-describedby": "checkn-help checkn-err", value: v.inputs.n, disabled: !!v.busy });
   nIn.addEventListener("input", () => (v.inputs.n = nIn.value.trim()));
   box.append(el("div", { class: "field" }, el("label", { for: "f-checkn", text: txt("tool.check.label") }),
     el("p", { class: "help", id: "checkn-help", text: txt("tool.check.help", { remaining, fit: Math.max(1, fit) }) }), nIn,
@@ -1982,7 +2014,7 @@ function renderReceipt(box, v, data) {
   const head = el("div", { class: "ov-head" },
     el("h3", { text: txt("tool.receipt.title", { id: String(v.id) }) }),
     el("span", { class: "badge s-" + o.status, id: "order-status", text: txt("tool.order.status." + o.status) }),
-    el("button", { type: "button", class: "btn btn-quiet btn-sm", text: txt("tool.order.refresh"), on: { click: () => loadOrder(v.id) } }),
+    el("button", { type: "button", class: "btn btn-quiet btn-sm", id: "receipt-refresh", text: txt("tool.order.refresh"), on: { click: () => loadOrder(v.id) } }),
     el("button", { type: "button", class: "btn btn-ghost btn-sm", id: "open-order-btn", text: txt("tool.receipt.openOrder", { id: String(v.id) }), on: { click: () => openOrder(v.id, "order") } }));
   if (o.status !== 2 || !data.receipt) {
     box.append(el("div", { class: "ov" }, head, el("div", { class: "ov-main" }, el("p", { class: "msg", id: "receipt-none", text: txt("tool.receipt.notPaid", { id: String(v.id) }) }))));
@@ -1990,7 +2022,10 @@ function renderReceipt(box, v, data) {
   }
   const r = data.receipt;
   head.append(el("p", { class: "help", text: txt("tool.receipt.help") }));
-  const hashOk = state.viem.keccak256(data.table).toLowerCase() === String(r.tableHash).toLowerCase();
+  // The contract's fingerprint: keccak256(abi.encodePacked(uint8 nIn, uint8 nOut, uint8 nState, table)), so the
+  // same bytes under another shape do not match.
+  const fp = state.viem.keccak256(state.viem.encodePacked(["uint8", "uint8", "uint8", "bytes"], [o.nIn, o.nOut, o.nState, data.table]));
+  const hashOk = fp.toLowerCase() === String(r.tableHash).toLowerCase();
   const rule = data.rule || {};
   const ruleOk = !rule.error && sameAddr(rule.processor, r.processor) && rule.circuitId === r.circuitId;
   const facts = el("dl", { class: "facts", id: "receipt-facts" },
@@ -2014,6 +2049,8 @@ function renderReceipt(box, v, data) {
 }
 
 // One row per input (its name as the row header), then the memory bit; each value is a 0/1 switch.
+// While a run is out the switches are off, so the answer always lands next to the inputs it was asked for; any
+// change to a switch afterwards clears the answer (doRun also drops an answer whose inputs no longer match).
 function tryBox(o, d, answers, labels, i) {
   const v = state.view;
   const n = o.nIn + o.nState;
@@ -2021,15 +2058,16 @@ function tryBox(o, d, answers, labels, i) {
   const box = el("div", { class: "box", id: "try-box" }, el("h4", { text: txt("tool.receipt.tryHeading") }), el("p", { class: "help", text: txt("tool.receipt.tryHelp") }));
   const body = el("tbody");
   for (let k = 0; k < n; k++) {
-    const name = k < o.nIn ? colHead(labels, k, o.nIn) : labels?.[k] ? colHead(labels, k, o.nIn) : txt("tool.receipt.memoryRow");
+    const named = k < o.nIn || !!T.cleanName(labels?.[k]);
+    const name = named ? colHead(labels, k, o.nIn) : txt("tool.receipt.memoryRow");
     const bit = v.tryBits[k];
-    const b = el("button", { type: "button", class: "bit", "data-k": k, "aria-pressed": String(!!bit), "aria-label": txt("tool.receipt.cellLabel", { name, v: bit }), text: String(bit) });
+    const b = el("button", { type: "button", class: "bit", "data-k": k, "aria-pressed": String(!!bit), "aria-label": txt("tool.receipt.cellLabel", { name, v: bit }), text: String(bit), disabled: !!v.busy });
     b.addEventListener("click", () => {
       v.tryBits[k] ^= 1;
       v.tryResult = null;
       renderOrder();
     });
-    body.appendChild(el("tr", {}, el("th", { scope: "row", text: name }), el("td", {}, b)));
+    body.appendChild(el("tr", {}, el("th", { scope: "row" }, named ? colHeadNode(labels, k, o.nIn) : name), el("td", {}, b)));
   }
   box.append(el("table", { class: "try-table" },
     el("thead", {}, el("tr", {}, el("th", { scope: "col", text: txt("tool.receipt.colInput") }), el("th", { scope: "col", text: txt("tool.receipt.colValue") }))), body));
@@ -2049,6 +2087,9 @@ function tryBox(o, d, answers, labels, i) {
 // run / runStep as a free eth_call with an explicit gas limit under the public node's cap. The contract refuses
 // (InsufficientGasForCase) rather than answer with less gas than the circuit's budget, and the page shows only
 // bits it got back in full, so a cut-short call becomes an error, never an answer.
+// An answer is shown only if, when it arrives, the page still shows the same receipt on the same network with the
+// same switches. Otherwise it is dropped: a refresh, another order, the order view or another network replace
+// state.view; switches that changed anyway (they are off while the call is out) clear it.
 async function doRun(o, d, answers) {
   const v = state.view;
   const i = info();
@@ -2071,6 +2112,7 @@ async function doRun(o, d, answers) {
       ? await state.pub.readContract({ address: L, abi: state.abi, functionName: "runStep", args: [id, stateHex, inputs], gas })
       : await state.pub.readContract({ address: L, abi: state.abi, functionName: "run", args: [id, inputs], gas });
     if (state.view !== v || state.netKey !== key) return;
+    if (v.tryBits.join() !== bits.join()) return dropRun(v);
     const outHex = o.nState ? r[1] : r;
     const outBytes = state.viem.hexToBytes(outHex);
     const nsBytes = o.nState ? state.viem.hexToBytes(r[0]) : new Uint8Array(0);
@@ -2089,9 +2131,15 @@ async function doRun(o, d, answers) {
     v.tryResult = res;
   } catch (e) {
     if (state.view !== v || state.netKey !== key) return;
+    if (v.tryBits.join() !== bits.join()) return dropRun(v);
     v.tryResult = { err: true, text: explain(e, { read: true, action: "run" }).text };
   }
   v.busy = false;
+  renderOrder();
+}
+function dropRun(v) {
+  v.busy = false;
+  v.tryResult = null;
   renderOrder();
 }
 
