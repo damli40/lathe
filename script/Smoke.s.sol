@@ -12,7 +12,7 @@ import {MockProcessor} from "../test/mocks/MockProcessor.sol";
 /// @notice Testnet smoke run (chain 1952) against the contracts DeployTestnet made.
 /// Env: LATHE, USDT, PROCESSOR, XOR_ID, WRONG_ID, FORMULA_PROCESSOR, REF_PROCESSOR; optional TOGGLE_ID (default 3),
 /// WRONG_TOGGLE_ID (default 4), ADD22_ID (1), GE32_ID (2), GE32_WRONG_ID (3), GE66_ID (4), GE23_ID (5),
-/// REFUND_DELAY (seconds, default 300).
+/// REFUND_DELAY (seconds, default 900: on a slow public RPC the script takes several minutes to simulate before it sends, and a 300 s deadline had already passed when the order was sent).
 /// The broadcaster must be the deployer (it owns the mock circuits and holds the mUSDT). Every order names the
 /// broadcaster as its builder: the contract refuses an order without one (BuilderRequired).
 ///   (a) 2-input XOR order + deliver the honest circuit. deliver checks small circuits inline, so it pays at once.
@@ -96,7 +96,7 @@ contract Smoke is Script {
         address processor = vm.envAddress("PROCESSOR");
         uint256 xorId = vm.envUint("XOR_ID");
         uint256 wrongId = vm.envUint("WRONG_ID");
-        uint256 refundDelay = vm.envOr("REFUND_DELAY", uint256(300));
+        uint256 refundDelay = vm.envOr("REFUND_DELAY", uint256(900));
         require(address(lathe.usdt()) == address(usdt), "Smoke: USDT does not match LATHE.usdt()");
 
         uint64 deadline = uint64(block.timestamp + 1 days);

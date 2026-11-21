@@ -101,7 +101,7 @@ What it does and what you should see:
 |---|---|---|
 | (a) | Creates an order for 2-input XOR (1 mUSDT) naming you as the builder, delivers the honest circuit | `order id 1 status 2` (2 = Paid). Small circuits are checked inside `deliver`, so it pays in the same transaction |
 | (b) | Creates a second order, then tries the wrong circuit | `deliver reverts WrongAnswer(3)`, `order id 2 status 0` (0 = Open). Case 3 is 1 XOR 1, where the wrong circuit says 1 |
-| (c) | Creates a third order with a 5-minute deadline | `order id 3 status 0`, plus the exact `cast send ... refund` command |
+| (c) | Creates a third order with a 15-minute deadline | `order id 3 status 0`, plus the exact `cast send ... refund` command |
 | (d) | Creates a memory order (1 input, 1 output, 1 memory bit, table `0x3c`) with input names `flip` and `mem`, delivers the honest toggle circuit 3 | `order id 4 status 2` (Paid in the same transaction) |
 | (e) | Creates a second memory order, then tries the wrong toggle circuit 4 | `deliver reverts WrongAnswer(3)` (simulated, not sent), `order id 5 status 0`. Case 3 is x0 = 1 with memory 1, where circuit 4 keeps the memory at 1 instead of 0 |
 | (f) | Reads the two paid orders (1 and 4): `receipts`, `ruleOf`, `labelsOf`, then `run` on all 4 XOR cases and `runStep` on all 4 toggle cases | `receipt + ruleOf ok for order 1` and `... order 4`, `labelsOf: (a) none, (d) flip, mem`, `run(a): ...`, `runStep(d): ...`. Any wrong answer stops the script with a `Smoke (f): ...` message |
@@ -130,7 +130,7 @@ The receipt's fingerprint (third value) is `keccak256(abi.encodePacked(nIn, nOut
 
 About (b): `forge` will not send a transaction it knows will revert, so the wrong delivery is **simulated** and its error checked, not sent. If you want a failed transaction on chain as evidence, the script prints a `cast send ... --gas-limit 1000000` command that sends it anyway. That transaction will show as failed on OKLink, and order 2 stays Open.
 
-For (c): wait until the printed deadline passes (5 minutes; set `REFUND_DELAY=<seconds>` to change it), then run the printed `cast send ... refund(uint256) 3 ...` command. Then run the printed `cast call ... orders(...)` command: the last number must be `3` (Refunded). A refund before the deadline reverts `RefundNotAllowed`, which is correct.
+For (c): wait until the printed deadline passes (15 minutes by default, because on a slow public RPC the script takes several minutes to simulate before it sends; set `REFUND_DELAY=<seconds>` to change it), then run the printed `cast send ... refund(uint256) 3 ...` command. Then run the printed `cast call ... orders(...)` command: the last number must be `3` (Refunded). A refund before the deadline reverts `RefundNotAllowed`, which is correct.
 
 Order 2's 1 mUSDT can also be refunded with the same command and id 2, but only after its one-day deadline.
 
