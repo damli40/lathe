@@ -2,14 +2,22 @@
 // The constants (base, perGate, reserve, inlineMax, maxCaseGas) are read from the deployed contract
 // at run time and passed in; nothing here hard-codes them.
 
-/** LatheOrders.evalBudget: gas each case's eval gets. */
+/** LatheOrders.evalBudget: the formula for the gas each case's eval gets. */
 export function evalBudget(c, gateCount) {
   return c.base + c.perGate * BigInt(gateCount);
 }
 
+/**
+ * The gas each case really gets: the delivery's stored per-case gas (caseGasOf / pieceCaseGasOf, or the figure
+ * about to be declared) when there is one, else the formula. A contract from before the getters has none.
+ */
+export function caseBudget(c, gateCount, caseGas) {
+  return caseGas && caseGas > 0n ? caseGas : evalBudget(c, gateCount);
+}
+
 /** True when deliver checks every case in the same transaction (LatheOrders._checkInlineIfSmall). */
-export function checksInline(c, cases, gateCount) {
-  return BigInt(cases) * evalBudget(c, gateCount) <= c.inlineMax;
+export function checksInline(c, cases, gateCount, caseGas) {
+  return BigInt(cases) * caseBudget(c, gateCount, caseGas) <= c.inlineMax;
 }
 
 /** The largest gate count whose full check still fits inside deliver for this many cases. */
@@ -28,8 +36,8 @@ export const PER_CASE_EXTRA = 30_000n; // packing inputs, comparing the answer, 
 export const TX_GAS_CAP = 200_000_000n; // under the X Layer block gas limit of 210,000,000
 
 /** Gas one case must have free before eval is called: budget * 64/63 + reserve (LatheOrders._caseMatches). */
-export function perCaseHold(c, gateCount) {
-  const b = evalBudget(c, gateCount);
+export function perCaseHold(c, gateCount, caseGas) {
+  const b = caseBudget(c, gateCount, caseGas);
   return (b * 64n + 62n) / 63n + c.reserve;
 }
 
@@ -38,18 +46,18 @@ export function perCaseHold(c, gateCount) {
  * needs its full hold free. Unused gas is not charged, so a high limit costs nothing extra.
  * Returns { gas, inline, capped }.
  */
-export function deliverGasLimit(c, cases, gateCount) {
-  const inline = checksInline(c, cases, gateCount);
+export function deliverGasLimit(c, cases, gateCount, caseGas) {
+  const inline = checksInline(c, cases, gateCount, caseGas);
   let gas = DELIVER_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount);
-  if (inline) gas += BigInt(cases) * (perCaseHold(c, gateCount) + PER_CASE_EXTRA);
+  if (inline) gas += BigInt(cases) * (perCaseHold(c, gateCount, caseGas) + PER_CASE_EXTRA);
   const capped = gas > TX_GAS_CAP;
   return { gas: capped ? TX_GAS_CAP : gas, inline, capped };
 }
 
 /** Explicit gas limit for check(orderId, n). */
-export function checkGasLimit(c, n, gateCount) {
+export function checkGasLimit(c, n, gateCount, caseGas) {
   const gas =
-    CHECK_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + BigInt(n) * (perCaseHold(c, gateCount) + PER_CASE_EXTRA);
+    CHECK_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + BigInt(n) * (perCaseHold(c, gateCount, caseGas) + PER_CASE_EXTRA);
   return gas > TX_GAS_CAP ? TX_GAS_CAP : gas;
 }
 
@@ -58,19 +66,28 @@ export function checkGasLimit(c, n, gateCount) {
 // contract's per-case gasleft() test fails inside it. Simulations stay under this cap, with room to spare.
 export const SIM_GAS_CAP = 48_000_000n;
 
+/**
+ * Second try for a case that did not finish under SIM_GAS_CAP: enough for MAX_CASE_GAS through TapeOut's 63/64 plus
+ * the call's own cost. A public node cuts this to 50M too, so the case stays "could not test" there; a node without
+ * the cap (a local anvil, your own node) answers, which is how a case too big even for MAX_CASE_GAS is found.
+ */
+export function simRetryCap(c) {
+  return (c.maxCaseGas * 64n) / 63n + 1_000_000n;
+}
+
 /** Gas check(orderId, n) needs, before the transaction cap is applied. */
-function checkGasRaw(c, n, gateCount) {
-  return CHECK_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + BigInt(n) * (perCaseHold(c, gateCount) + PER_CASE_EXTRA);
+function checkGasRaw(c, n, gateCount, caseGas) {
+  return CHECK_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + BigInt(n) * (perCaseHold(c, gateCount, caseGas) + PER_CASE_EXTRA);
 }
 
 /**
  * How many of `n` cases a check simulation can run under `cap`. 0 means not even one case fits, so the
  * check cannot be simulated through a capped RPC at all.
  */
-export function simCases(c, n, gateCount, cap = SIM_GAS_CAP) {
+export function simCases(c, n, gateCount, cap = SIM_GAS_CAP, caseGas) {
   const room = cap - CHECK_OVERHEAD - NETLIST_GAS_PER_GATE * BigInt(gateCount);
   if (room <= 0n) return 0;
-  const fit = room / (perCaseHold(c, gateCount) + PER_CASE_EXTRA);
+  const fit = room / (perCaseHold(c, gateCount, caseGas) + PER_CASE_EXTRA);
   return Number(fit < BigInt(n) ? fit : BigInt(n));
 }
 
@@ -88,9 +105,9 @@ export function maxSimGates(c, cap = SIM_GAS_CAP) {
 }
 
 /** The most cases one check transaction can run under the cap. */
-export function maxCasesPerCheck(c, gateCount) {
+export function maxCasesPerCheck(c, gateCount, caseGas) {
   const room = TX_GAS_CAP - CHECK_OVERHEAD - NETLIST_GAS_PER_GATE * BigInt(gateCount);
-  const per = perCaseHold(c, gateCount) + PER_CASE_EXTRA;
+  const per = perCaseHold(c, gateCount, caseGas) + PER_CASE_EXTRA;
   return room > 0n ? room / per : 0n;
 }
 
@@ -158,9 +175,9 @@ export const RUN_OVERHEAD = 300_000n;
 
 const hop = (g) => (g * 64n + 62n) / 63n;
 
-/** Gas to ask for when calling run / runStep on a circuit of `gateCount` gates. */
-export function runGasLimit(c, gateCount) {
-  return hop(RUN_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + perCaseHold(c, gateCount));
+/** Gas to ask for when calling run / runStep on a circuit of `gateCount` gates (`caseGas`: its stored per-case gas). */
+export function runGasLimit(c, gateCount, caseGas) {
+  return hop(RUN_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + perCaseHold(c, gateCount, caseGas));
 }
 
 /**
@@ -168,9 +185,9 @@ export function runGasLimit(c, gateCount) {
  * piece 1 on its answer), and each piece's eval needs its own full hold free, so every piece's netlist read and
  * hold are added. `gateCounts` holds each piece's recorded gate count.
  */
-export function runPiecedGasLimit(c, gateCounts) {
+export function runPiecedGasLimit(c, gateCounts, caseGases = []) {
   let g = RUN_OVERHEAD;
-  for (const n of gateCounts) g += NETLIST_GAS_PER_GATE * BigInt(n) + perCaseHold(c, n);
+  gateCounts.forEach((n, k) => (g += NETLIST_GAS_PER_GATE * BigInt(n) + perCaseHold(c, n, caseGases[k])));
   return hop(g);
 }
 
@@ -180,7 +197,8 @@ export function runPiecedGasLimit(c, gateCounts) {
  * then makes one eval of the top with the top's budget: evalBudget(top gates) + perRef x pieces (the contract's
  * EVAL_GAS_PER_REF; 0 on a contract from before it, which gave the top evalBudget alone). The top's gate count
  * already includes every piece's gates, so the pieces get no hold of their own. `pieces` holds each piece's
- * recorded gate count and input count: [{ gates, nIn }].
+ * recorded gate count and input count: [{ gates, nIn, caseGas }] (caseGas: the piece's stored per-case gas, if any;
+ * what it adds above the piece's formula is added to the top's budget, as the contract does).
  */
 export function runTopGasLimit(c, pieces, topGates) {
   let g = RUN_OVERHEAD;
@@ -190,13 +208,17 @@ export function runTopGasLimit(c, pieces, topGates) {
     topBytes += 31n + 3n * BigInt(p.nIn);
   }
   g += NETLIST_GAS_PER_GATE * ((topBytes + 6n) / 7n); // a NAND record is 7 bytes: one gate's worth of netlist
-  g += topHold(c, pieces.length, topGates);
+  const extra = pieces.reduce((s, p) => s + (caseBudget(c, p.gates, p.caseGas) - evalBudget(c, p.gates)), 0n);
+  g += topHold(c, pieces.length, topGates, extra);
   return hop(g);
 }
 
-/** Gas the top's one eval must have free: its budget * 64/63 + reserve (LatheReads._paidBudget). */
-export function topHold(c, nPieces, topGates) {
-  const b = evalBudget(c, topGates) + (c.perRef ?? 0n) * BigInt(nPieces);
+/**
+ * Gas the top's one eval must have free: its budget * 64/63 + reserve (LatheReads.run). The budget is
+ * evalBudget(top gates) + perRef x pieces + `extra`, what the pieces' declared per-case gas added above their formula.
+ */
+export function topHold(c, nPieces, topGates, extra = 0n) {
+  const b = evalBudget(c, topGates) + (c.perRef ?? 0n) * BigInt(nPieces) + extra;
   return (b * 64n + 62n) / 63n + c.reserve;
 }
 
@@ -204,6 +226,75 @@ export function topHold(c, nPieces, topGates) {
  * True when a run call fits under the public node's eth_call cap. When it does not, the page does not call:
  * the node would cut the gas and the contract would refuse (InsufficientGasForCase), so there is no answer to show.
  */
-export function runFitsSim(c, gateCount, cap = SIM_GAS_CAP) {
-  return runGasLimit(c, gateCount) <= cap;
+export function runFitsSim(c, gateCount, cap = SIM_GAS_CAP, caseGas) {
+  return runGasLimit(c, gateCount, caseGas) <= cap;
+}
+
+// ---- testing every case before a delivery, and the per-case gas to declare ----
+
+// Margin on top of the costliest case, as a percent. TapeOut's proxy passes on 63/64 of the gas it gets, so the
+// figure is also scaled by 64/63 (the measured figure may already include it; the extra 1.6% is kept as room).
+export const CASE_GAS_MARGIN_PCT = 10n;
+export const CASE_GAS_ROUND = 10_000n;
+
+/** Intrinsic gas of a plain call with this calldata (21,000 + 16 per non-zero byte + 4 per zero byte). */
+export function intrinsicGas(dataHex) {
+  const h = dataHex.startsWith("0x") ? dataHex.slice(2) : dataHex;
+  let g = 21_000n;
+  for (let i = 0; i < h.length; i += 2) g += h.slice(i, i + 2) === "00" ? 4n : 16n;
+  return g;
+}
+
+/**
+ * What one case's circuit call needs, from eth_estimateGas on a call straight to the processor (its own fresh
+ * transaction, so everything it touches is cold): the estimate minus the transaction's intrinsic gas. That is the
+ * gas the circuit must be handed, as LatheOrders hands it: eval{gas: budget}.
+ */
+export function needFromEstimate(estimate, dataHex) {
+  const n = BigInt(estimate) - intrinsicGas(dataHex);
+  return n > 0n ? n : 0n;
+}
+
+/** The per-case gas to declare for a costliest case that needs `worst`: worst x 64/63, + 10%, rounded up to 10,000. */
+export function proposeCaseGas(worst) {
+  const g = (BigInt(worst) * 64n * (100n + CASE_GAS_MARGIN_PCT) + 63n * 100n - 1n) / (63n * 100n);
+  return ((g + CASE_GAS_ROUND - 1n) / CASE_GAS_ROUND) * CASE_GAS_ROUND;
+}
+
+/**
+ * Decide a delivery from every case's measured need. `needs[i]` is case i's need (BigInt), or null when the case
+ * could not be tested (it did not finish under the public node's eth_call cap, or it failed). An untested case
+ * never counts as fitting.
+ * Returns { kind, formula, worst, worstCase, proposed, untested }:
+ *   "formula"  every tested case fits the formula budget with the margin: deliver as before (no declared gas);
+ *   "declare"  some case needs more: deliver with `proposed` as the per-case gas;
+ *   "tooBig"   even MAX_CASE_GAS would not be enough: do not deliver;
+ *   "untested" no tested case needs more than the formula, but some case could not be tested: deliver with the
+ *              formula, and say plainly that nothing is known about those cases (never that they fit).
+ * `untested` lists the cases with no measurement; when it is not empty the page says so and claims nothing for them.
+ */
+export function planCaseGas(c, gateCount, needs) {
+  const formula = evalBudget(c, gateCount);
+  let worst = 0n;
+  let worstCase = -1;
+  const untested = [];
+  needs.forEach((n, i) => {
+    if (n === null || n === undefined) untested.push(i);
+    else if (n > worst) {
+      worst = n;
+      worstCase = i;
+    }
+  });
+  const proposed = worstCase < 0 ? 0n : proposeCaseGas(worst);
+  let kind = proposed <= formula ? "formula" : "declare";
+  if (proposed > c.maxCaseGas) kind = "tooBig";
+  if (kind === "formula" && untested.length) kind = "untested";
+  return { kind, formula, worst, worstCase, proposed, untested };
+}
+
+/** Check transactions a full check needs at most, with this per-case gas (the most cases per transaction). */
+export function checkTxCount(c, cases, gateCount, caseGas) {
+  const per = maxCasesPerCheck(c, gateCount, caseGas);
+  if (per <= 0n) return null;
+  return Number((BigInt(cases) + per - 1n) / per);
 }

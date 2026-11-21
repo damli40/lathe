@@ -15,7 +15,7 @@ export async function connect(page) {
 }
 
 /** Fill the create form and run approve + create. Returns the new order id (string). */
-export async function createOrder(page, { preset = "xor", amount = "1", builder = "mine", deadline = null, nIn = null, memory = null } = {}) {
+export async function createOrder(page, { preset = "xor", amount = "1", builder = "mine", deadline = null, nIn = null, memory = null, maxGates = null } = {}) {
   await page.click("#tab-create");
   if (memory !== null) await page.click(`#mem-seg [data-nstate="${memory}"]`);
   if (nIn) await page.click(`#nin-seg button:nth-child(${nIn})`);
@@ -24,6 +24,7 @@ export async function createOrder(page, { preset = "xor", amount = "1", builder 
   if (builder === "mine") await page.click("#use-mine");
   else await page.fill("#f-builder", builder);
   if (deadline) await page.fill("#f-deadline", deadline);
+  if (maxGates !== null) await page.fill("#f-maxgates", String(maxGates));
   await page.locator("#f-amount").blur();
   // approve when needed (the page reads the allowance first and hides approve when it is enough)
   await page.waitForFunction(() => {

@@ -333,6 +333,8 @@ async function loadLib() {
     state.procAbi = viem.parseAbi([
       "function circuitInfo(uint256) view returns (uint32,uint32,uint32,uint32)",
       "function ownerOf(uint256) view returns (address)",
+      "function eval(uint256,bytes) view returns (bytes)",
+      "function step(uint256,bytes,bytes) view returns (bytes,bytes)",
     ]);
     state.factoryAbi = viem.parseAbi(["function isCPU(address) view returns (bool)"]);
     return true;
@@ -385,7 +387,8 @@ async function readMany(thunks) {
 // (a per-viewer convenience; the page reads them again whenever the cache is missing or unreadable).
 // perRef is EVAL_GAS_PER_REF (extra run gas per piece for a top circuit); 0 for a contract from before it.
 const INFO_BIG = ["base", "perGate", "reserve", "inlineMax", "maxCaseGas", "grace", "perRef"];
-const infoCacheKey = (n) => `lathe.info.v3.${n.chainId}.${n.lathe.toLowerCase()}`;
+// hasCaseGas: the contract takes a declared per-case gas (deliver with caseGas, caseGasOf); false before the fix.
+const infoCacheKey = (n) => `lathe.info.v4.${n.chainId}.${n.lathe.toLowerCase()}`;
 const isInt = (x, lo, hi) => Number.isInteger(x) && x >= lo && x <= hi;
 
 // A cached entry is used only if every field has the right type and a sane range; anything else is re-read.
@@ -401,6 +404,7 @@ function cachedInfo(raw) {
   if (!isInt(c.decimals, 0, 36) || !isInt(c.feeBps, 0, 500)) return null;
   if (!state.viem.isAddress(c.token || "") || !state.viem.isAddress(c.factory || "")) return null;
   if (typeof c.symbol !== "string" || c.symbol.length > 32) return null;
+  if (typeof c.hasCaseGas !== "boolean") return null;
   return c;
 }
 
@@ -440,6 +444,14 @@ async function loadInfo() {
   } catch (e) {
     if (explain(e, { read: true }).name === "network") throw e;
     i.perRef = 0n;
+  }
+  // caseGasOf exists only on a contract with the declared per-case gas; a revert means an older contract.
+  try {
+    await read(L, A, "caseGasOf", [0n]);
+    i.hasCaseGas = true;
+  } catch (e) {
+    if (explain(e, { read: true }).name === "network") throw e;
+    i.hasCaseGas = false;
   }
   const [dec, sym] = await readMany([() => read(i.token, state.tokenAbi, "decimals"), () => read(i.token, state.tokenAbi, "symbol")]);
   i.decimals = Number(dec);
@@ -1138,6 +1150,9 @@ function validateAll(show = true) {
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     unix: dh && Number.isFinite(dh.getTime()) ? String(Math.floor(dh.getTime() / 1000)) : "-",
   }));
+  // Soft warning, not a block: an order cannot be cancelled before its deadline, so a far deadline locks the money.
+  const far = d.value !== undefined && d.value > BigInt(Math.floor(Date.now() / 1000)) + 90n * 86400n;
+  setText("#deadline-warn", far ? txt("tool.create.deadlineFar") : "");
   if (show) {
     showErr("amount", a.error ? txt("tool.create.errors.amount." + a.error, { symbol: i.symbol, decimals: i.decimals, amount: state.form.balance !== null ? fmtAmount(state.form.balance) : "" }) : "");
     showErr("deadline", d.error ? txt("tool.create.errors.deadline." + d.error) : "");
@@ -1522,7 +1537,7 @@ async function loadOrder(id, keep = {}) {
         next,
         order: { buyer: o[0], builder: o[1], amount: o[2], deadline: o[3], maxGates: Number(o[4]), nIn: Number(o[5]), nOut: Number(o[6]), nState: Number(o[7]), status: Number(o[8]) },
         table,
-        delivery: { processor: d[0], circuitId: d[1], builder: d[2], gateCount: Number(d[3]), netlistHash: d[4], nextCase: Number(d[5]) },
+        delivery: { processor: d[0], circuitId: d[1], builder: d[2], gateCount: Number(d[3]), netlistHash: d[4], nextCase: Number(d[5]), caseGas: await readCaseGas(L, A, "caseGasOf", [id]) },
         now: block.timestamp,
         nowAt: performance.now(),
       };
@@ -1564,6 +1579,17 @@ async function loadOrder(id, keep = {}) {
   renderOrder();
 }
 
+// The per-case gas stored with a delivery (caseGasOf / pieceCaseGasOf): null on a contract from before it, which
+// gave every case the formula (G.caseBudget then uses the formula). A network failure is thrown, as elsewhere.
+async function readCaseGas(L, A, fn, args) {
+  try {
+    return await read(L, A, fn, args);
+  } catch (e) {
+    if (explain(e, { read: true }).name === "network") throw e;
+    return null;
+  }
+}
+
 // A pieced order's pieces (createPiecedOrder) and each piece's record, gate cap and table. Empty for a V0-V2 order,
 // and for a contract from before pieced orders (no piecesOf): that read reverts, which here means "no pieces". A
 // network failure is not taken as "no pieces": it is thrown, so the view shows the read error instead of a V0 view.
@@ -1581,11 +1607,12 @@ async function readPieces(L, A, id) {
     () => read(L, A, "pieceTableOf", [id, BigInt(i)]),
     () => read(L, A, "pieceMaxGatesOf", [id, BigInt(i)]),
   ]));
+  const gasOf = await readMany(pieces.map((_, i) => () => readCaseGas(L, A, "pieceCaseGasOf", [id, BigInt(i)])));
   return pieces.map((p, i) => {
     const d = per[3 * i];
     return {
       ...p,
-      delivery: { processor: d[0], circuitId: d[1], builder: d[2], gateCount: Number(d[3]), netlistHash: d[4], nextCase: Number(d[5]) },
+      delivery: { processor: d[0], circuitId: d[1], builder: d[2], gateCount: Number(d[3]), netlistHash: d[4], nextCase: Number(d[5]), caseGas: gasOf[i] },
       table: per[3 * i + 1],
       maxGates: Number(per[3 * i + 2]),
     };
@@ -1801,7 +1828,8 @@ function deliverBox(o, now) {
       el("p", { class: "help", id: "circ-help", text: txt("tool.deliver.circuitHelp") }), circIn,
       el("p", { class: "err", id: "circ-err", text: v.msgs.circErr || "" })),
   );
-  const readBtn = el("button", { type: "button", class: "btn btn-ghost", id: "read-circuit", text: txt(v.busy === "read" ? "tool.deliver.reading" : "tool.deliver.readBtn"), disabled: !!v.busy });
+  const readLabel = v.busy === "read" && v.testing ? txt("tool.deliver.caseGas.testing", { n: v.testing.n, total: v.testing.total }) : txt(v.busy === "read" ? "tool.deliver.reading" : "tool.deliver.readBtn");
+  const readBtn = el("button", { type: "button", class: "btn btn-ghost", id: "read-circuit", text: readLabel, disabled: !!v.busy });
   readBtn.addEventListener("click", () => readCircuit(o));
   box.append(readBtn);
 
@@ -1821,11 +1849,13 @@ function deliverBox(o, now) {
     if (pv.owner && state.account && !sameAddr(pv.owner, state.account)) problems.push(txt("tool.deliver.notOwner"));
     if (pv.nIn !== o.nIn || pv.nOut !== o.nOut || pv.nState !== o.nState) problems.push(txt("tool.deliver.shapeBad"));
     if (o.maxGates && pv.gates > o.maxGates) problems.push(txt("tool.deliver.tooMany", { g: fmtInt(pv.gates), max: fmtInt(o.maxGates) }));
-    if (pv.budget > info().maxCaseGas) problems.push(txt("tool.deliver.tooBig"));
+    if (pv.formula > info().maxCaseGas) problems.push(txt("tool.deliver.tooBig"));
+    if (pv.plan?.kind === "tooBig") problems.push(txt("tool.deliver.caseGas.tooBig", { c: pv.plan.worstCase, need: fmtInt(pv.plan.worst), max: fmtInt(info().maxCaseGas) }));
     for (const pmsg of problems) box.append(el("p", { class: "msg is-err", text: pmsg }));
     box.append(el("div", { class: "gasinfo" },
-      el("p", {}, txt("tool.deliver.budget", { budget: "" }), el("span", { class: "mono", text: fmtInt(pv.budget) })),
+      el("p", {}, txt("tool.deliver.budget", { budget: "" }), el("span", { class: "mono", id: "deliver-budget", text: fmtInt(pv.budget) })),
       el("p", { class: "help", id: "budget-refs", text: txt("tool.deliver.budgetRefs") }),
+      caseGasNode(pv),
       el("p", { text: pv.inline ? txt("tool.deliver.inlineYes", { cases: T.caseCount(o.nIn, o.nState) }) : txt("tool.deliver.inlineNo") }),
       el("p", {}, txt("tool.deliver.gasLimit", { gas: "" }), el("span", { class: "mono", text: fmtInt(pv.gas) })),
       el("p", { text: txt("tool.deliver.gasWhy") }),
@@ -1837,7 +1867,7 @@ function deliverBox(o, now) {
   else if (!sameAddr(state.account, o.builder)) gate = txt("tool.deliver.onlyBuilder", { addr: short(o.builder) });
   else if (wrongNetwork()) gate = txt("tool.wallet.wrongNet", { net: txt("tool.network." + n.key) });
   const label = v.busy === "deliver" ? txt("tool.deliver.simulating") : txt("tool.deliver.deliverBtn", { id: v.inputs.circuit || "" }).trim();
-  const dBtn = el("button", { type: "button", class: "btn btn-primary", id: "deliver-btn", text: label, disabled: !!gate || !!v.busy });
+  const dBtn = el("button", { type: "button", class: "btn btn-primary", id: "deliver-btn", text: label, disabled: !!gate || !!v.busy || pv?.plan?.kind === "tooBig" });
   dBtn.addEventListener("click", () => doDeliver(o));
   box.append(dBtn);
   if (gate) box.append(el("p", { class: "help", text: gate }));
@@ -1849,6 +1879,27 @@ function deliverBox(o, now) {
   const mn = msgNode(v.msgs.deliver);
   if (mn) box.append(mn);
   return box;
+}
+
+// What testing every case found, and what the page will do about it (G.planCaseGas).
+function caseGasNode(pv) {
+  const p = pv.plan;
+  if (!p) return null;
+  const i = info();
+  const wrap = el("div", { id: "casegas", "data-kind": p.kind, "data-declared": pv.caseGas.toString() });
+  const say = (key, vars, cls = "") => wrap.append(el("p", { class: cls, text: txt("tool.deliver.caseGas." + key, vars) }));
+  if (p.worstCase >= 0) say("worst", { c: p.worstCase, need: fmtInt(p.worst) });
+  if (p.kind === "formula") say("fits", { formula: fmtInt(p.formula) });
+  if (p.kind === "declare" && i.hasCaseGas) {
+    say("declare", { formula: fmtInt(p.formula), gas: fmtInt(p.proposed) });
+    say("txs", { declared: pv.txs.declared ?? "-", formula: pv.txs.formula ?? "-" });
+  }
+  if (p.kind === "declare" && !i.hasCaseGas) say("oldContract", { formula: fmtInt(p.formula) }, "msg is-err");
+  if (p.untested.length) {
+    const list = p.untested.length > 8 ? p.untested.slice(0, 8).join(", ") + ", ..." : p.untested.join(", ");
+    say("untested", { n: p.untested.length, list, cap: fmtInt(G.SIM_GAS_CAP) }, "msg is-err");
+  }
+  return wrap;
 }
 
 function parseDeliverInputs() {
@@ -1895,15 +1946,29 @@ async function readCircuit(o) {
     } else {
       const ci = await read(inp.processor, state.procAbi, "circuitInfo", [inp.id]);
       const gates = Number(ci[3]);
-      const budget = await read(net().lathe, state.abi, "evalBudget", [BigInt(gates)]);
-      const g = G.deliverGasLimit(i, T.caseCount(o.nIn, o.nState), gates);
-      v.preview = { processor: inp.processor, id: inp.id, isCpu, owner, nIn: Number(ci[0]), nOut: Number(ci[1]), nState: Number(ci[2]), gates, budget, ...g };
+      const formula = await read(net().lathe, state.abi, "evalBudget", [BigInt(gates)]);
+      const shape = { nIn: Number(ci[0]), nOut: Number(ci[1]), nState: Number(ci[2]) };
+      const cases = T.caseCount(o.nIn, o.nState);
+      // Every case on its own, before anything is sent (only when the shape matches; otherwise the contract
+      // refuses anyway and the inputs would not fit the circuit).
+      let plan = null;
+      if (shape.nIn === o.nIn && shape.nOut === o.nOut && shape.nState === o.nState) {
+        const needs = await measureCases(o, inp, cases, () => state.view === v && v.inputs.processor + "|" + v.inputs.circuit === asked);
+        if (needs) plan = G.planCaseGas(i, gates, needs);
+      }
+      // Declare only when a case needs more than the formula with the margin, and the contract takes a declared gas.
+      const caseGas = plan && plan.kind === "declare" && i.hasCaseGas ? plan.proposed : 0n;
+      const budget = caseGas > 0n ? caseGas : formula;
+      const g = G.deliverGasLimit(i, cases, gates, caseGas);
+      const txs = { formula: G.checkTxCount(i, cases, gates), declared: caseGas > 0n ? G.checkTxCount(i, cases, gates, caseGas) : null };
+      v.preview = { processor: inp.processor, id: inp.id, isCpu, owner, ...shape, gates, formula, budget, caseGas, plan, txs, ...g };
     }
   } catch (e) {
     v.preview = null;
     v.msgs.deliver = { err: true, text: explain(e, { read: true }).text };
   }
   v.busy = false;
+  v.testing = null;
   if (state.view !== v) return;
   // The boxes are off while the read is out; if they changed anyway, this read-out is for other inputs.
   if (v.inputs.processor + "|" + v.inputs.circuit !== asked) {
@@ -1911,6 +1976,39 @@ async function readCircuit(o) {
     v.msgs.deliver = null;
   }
   renderOrder();
+}
+
+// Each case as its own eth_estimateGas on a call straight to the processor's eval (step for a memory order): a
+// fresh simulated transaction, so everything the case touches is cold, as for the first case of a check
+// transaction. The estimate minus the call's intrinsic gas is what the circuit must be handed. The call is capped at
+// SIM_GAS_CAP because public nodes cut eth_call at 50M gas; a case that does not finish under it is tried once more
+// with G.simRetryCap (which a capped node cuts to 50M again), and a case that still does not finish, or fails, is
+// null, "could not test", and never counts as fitting. Returns null when the view or the inputs changed meanwhile.
+async function measureCases(o, inp, cases, still) {
+  const v = state.view;
+  const needs = [];
+  const mask = (1 << o.nIn) - 1;
+  for (let c = 0; c < cases; c++) {
+    if (!still()) return null;
+    v.testing = { n: c + 1, total: cases };
+    renderOrder();
+    const inputs = T.toHex(T.pack(c & mask, o.nIn));
+    const data = o.nState
+      ? state.viem.encodeFunctionData({ abi: state.procAbi, functionName: "step", args: [inp.id, T.toHex(T.pack(c >> o.nIn, o.nState)), inputs] })
+      : state.viem.encodeFunctionData({ abi: state.procAbi, functionName: "eval", args: [inp.id, inputs] });
+    let need = null;
+    for (const cap of [G.SIM_GAS_CAP, G.simRetryCap(info())]) {
+      try {
+        const est = await state.pub.request({ method: "eth_estimateGas", params: [{ to: inp.processor, data, gas: state.viem.toHex(cap) }] });
+        need = G.needFromEstimate(BigInt(est), data);
+        break;
+      } catch (e) {
+        if (explain(e, { read: true }).name === "network") throw e;
+      }
+    }
+    needs.push(need);
+  }
+  return still() ? needs : null;
 }
 
 async function doDeliver(o) {
@@ -1921,6 +2019,10 @@ async function doDeliver(o) {
   }
   if (!canSend()) return;
   const pv = v.preview;
+  if (pv.plan && pv.plan.kind === "tooBig") {
+    v.msgs.deliver = { err: true, text: txt("tool.deliver.caseGas.tooBig", { c: pv.plan.worstCase, need: fmtInt(pv.plan.worst), max: fmtInt(info().maxCaseGas) }) + " " + txt("tool.deliver.refusedNotSent") };
+    return renderOrder();
+  }
   v.busy = "deliver";
   v.failedCase = null;
   v.msgs.deliver = null;
@@ -1929,7 +2031,9 @@ async function doDeliver(o) {
   const key = state.netKey;
   try {
     const receipt = await send({
-      address: L, abi: state.abi, functionName: "deliver", args: [v.id, pv.processor, pv.id], gas: pv.gas,
+      address: L, abi: state.abi, functionName: "deliver", gas: pv.gas,
+      // The four-argument overload when the page declares a per-case gas; otherwise the old call, unchanged.
+      args: pv.caseGas > 0n ? [v.id, pv.processor, pv.id, Number(pv.caseGas)] : [v.id, pv.processor, pv.id],
       slot: (m) => {
         v.msgs.deliverTx = m;
         renderOrder();
@@ -1939,7 +2043,8 @@ async function doDeliver(o) {
     v.msgs.deliverTx = null;
     if (state.netKey !== key) return;
     const paid = parseEvents(receipt, L).some((e) => e.eventName === "Paid");
-    return loadOrder(v.id, { quiet: true, lastAction: { key: paid ? "tool.deliver.paid" : "tool.deliver.recorded" } });
+    const done = paid ? { key: "tool.deliver.paid" } : pv.caseGas > 0n ? { key: "tool.deliver.recordedDeclared", vars: { gas: fmtInt(pv.caseGas) } } : { key: "tool.deliver.recorded" };
+    return loadOrder(v.id, { quiet: true, lastAction: done });
   } catch (e) {
     v.busy = false;
     if (afterSendFailure(e, v, "deliverTx", "deliver", key)) return;
@@ -1992,7 +2097,7 @@ function checkBox(o, d, now) {
     return box;
   }
   const remaining = total - d.nextCase;
-  const fit = Number(G.maxCasesPerCheck(i, d.gateCount));
+  const fit = Number(G.maxCasesPerCheck(i, d.gateCount, d.caseGas));
   const maxN = Math.max(1, Math.min(remaining, fit));
   if (!v.inputs.n || Number(v.inputs.n) > maxN) v.inputs.n = String(maxN);
   const nIn = el("input", { class: "input mono", id: "f-checkn", type: "text", inputmode: "numeric", autocomplete: "off", "aria-describedby": "checkn-help checkn-err", value: v.inputs.n, disabled: !!v.busy });
@@ -2000,12 +2105,14 @@ function checkBox(o, d, now) {
   box.append(el("div", { class: "field" }, el("label", { for: "f-checkn", text: txt("tool.check.label") }),
     el("p", { class: "help", id: "checkn-help", text: txt("tool.check.help", { remaining, fit: Math.max(1, fit) }) }), nIn,
     el("p", { class: "err", id: "checkn-err", text: v.msgs.checkErr || "" })));
-  if (G.simCases(i, 1, d.gateCount) === 0) box.append(el("p", { class: "help", id: "check-nosim", text: txt("tool.check.noSim") }));
+  if (G.simCases(i, 1, d.gateCount, G.SIM_GAS_CAP, d.caseGas) === 0) box.append(el("p", { class: "help", id: "check-nosim", text: txt("tool.check.noSim") }));
   const n = Number(v.inputs.n);
-  const gas = Number.isInteger(n) && n > 0 ? G.checkGasLimit(i, n, d.gateCount) : null;
+  const gas = Number.isInteger(n) && n > 0 ? G.checkGasLimit(i, n, d.gateCount, d.caseGas) : null;
   if (gas) {
+    const declared = d.caseGas && d.caseGas > G.evalBudget(i, d.gateCount);
     box.append(el("div", { class: "gasinfo" },
-      el("p", {}, txt("tool.deliver.budget", { budget: "" }), el("span", { class: "mono", text: fmtInt(G.evalBudget(i, d.gateCount)) })),
+      el("p", {}, txt("tool.deliver.budget", { budget: "" }), el("span", { class: "mono", id: "check-budget", text: fmtInt(G.caseBudget(i, d.gateCount, d.caseGas)) })),
+      declared ? el("p", { class: "help", id: "check-declared", text: txt("tool.check.declared") }) : null,
       el("p", {}, txt("tool.deliver.gasLimit", { gas: "" }), el("span", { class: "mono", text: fmtInt(gas) })),
       el("p", { text: txt("tool.deliver.gasWhy") })));
   }
@@ -2043,14 +2150,14 @@ async function doCheck(o, d, maxN) {
   // SIM_GAS_CAP (it still catches GraceOver, NotChecking, CircuitChanged); if not even one case fits it is skipped.
   // A check that reverts only wastes its gas: it cannot move money. The real transaction runs all n cases with
   // the full explicit gas limit.
-  const k = G.simCases(i, n, d.gateCount);
+  const k = G.simCases(i, n, d.gateCount, G.SIM_GAS_CAP, d.caseGas);
   const L = net().lathe;
   const key = state.netKey;
   const total = T.caseCount(o.nIn, o.nState);
   try {
     const receipt = await send({
-      address: L, abi: state.abi, functionName: "check", args: [v.id, BigInt(n)], gas: G.checkGasLimit(i, n, d.gateCount),
-      simulate: k > 0 ? { args: [v.id, BigInt(k)], gas: G.checkGasLimit(i, k, d.gateCount) } : false,
+      address: L, abi: state.abi, functionName: "check", args: [v.id, BigInt(n)], gas: G.checkGasLimit(i, n, d.gateCount, d.caseGas),
+      simulate: k > 0 ? { args: [v.id, BigInt(k)], gas: G.checkGasLimit(i, k, d.gateCount, d.caseGas) } : false,
       slot: (m) => {
         v.msgs.checkTx = m;
         renderOrder();
@@ -2324,9 +2431,9 @@ function renderPiecedReceipt(box, v, data) {
 function runGas(i, pieces, data) {
   const d = data?.delivery;
   if (data?.needsTop && d && !/^0x0{40}$/i.test(String(d.processor))) {
-    return G.runTopGasLimit(i, pieces.map((p) => ({ gates: p.delivery.gateCount, nIn: p.nIn })), d.gateCount);
+    return G.runTopGasLimit(i, pieces.map((p) => ({ gates: p.delivery.gateCount, nIn: p.nIn, caseGas: p.delivery.caseGas })), d.gateCount);
   }
-  return G.runPiecedGasLimit(i, pieces.map((p) => p.delivery.gateCount));
+  return G.runPiecedGasLimit(i, pieces.map((p) => p.delivery.gateCount), pieces.map((p) => p.delivery.caseGas));
 }
 
 function piecedTryBox(o, pieces, labels, i, data) {
@@ -2422,7 +2529,7 @@ function tryBox(o, d, answers, labels, i) {
   }
   box.append(el("table", { class: "try-table" },
     el("thead", {}, el("tr", {}, el("th", { scope: "col", text: txt("tool.receipt.colInput") }), el("th", { scope: "col", text: txt("tool.receipt.colValue") }))), body));
-  const fits = G.runFitsSim(i, d.gateCount);
+  const fits = G.runFitsSim(i, d.gateCount, G.SIM_GAS_CAP, d.caseGas);
   const btn = el("button", { type: "button", class: "btn btn-primary", id: "run-btn", text: txt(v.busy === "run" ? "tool.receipt.running" : "tool.receipt.runBtn"), disabled: !fits || !!v.busy });
   btn.addEventListener("click", () => doRun(o, d, answers));
   box.append(btn);
@@ -2444,7 +2551,7 @@ function tryBox(o, d, answers, labels, i) {
 async function doRun(o, d, answers) {
   const v = state.view;
   const i = info();
-  if (!G.runFitsSim(i, d.gateCount)) return;
+  if (!G.runFitsSim(i, d.gateCount, G.SIM_GAS_CAP, d.caseGas)) return;
   const bits = v.tryBits.slice();
   let x = 0;
   for (let k = 0; k < o.nIn; k++) x |= bits[k] << k;
@@ -2457,7 +2564,7 @@ async function doRun(o, d, answers) {
   const id = v.id;
   const key = state.netKey;
   try {
-    const gas = G.runGasLimit(i, d.gateCount);
+    const gas = G.runGasLimit(i, d.gateCount, d.caseGas);
     const L = net().lathe;
     const r = o.nState
       ? await state.pub.readContract({ address: L, abi: state.abi, functionName: "runStep", args: [id, stateHex, inputs], gas })

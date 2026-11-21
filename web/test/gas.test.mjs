@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { evalBudget, checksInline, maxInlineGates, perCaseHold, deliverGasLimit, parseAmount, formatUnitsPlain, refundOpensAt, maxCasesPerCheck } from "../gas.js";
+import * as G from "../gas.js";
 
 const C = { base: 100_000n, perGate: 15_000n, reserve: 20_000n, inlineMax: 30_000_000n, maxCaseGas: 100_000_000n };
 
@@ -165,4 +166,62 @@ test("run gas for a top: pieces' netlists + the top's REF records + ONE hold for
   // A contract from before EVAL_GAS_PER_REF gave the top evalBudget(gates) alone.
   const old = { base: 100_000n, perGate: 15_000n, reserve: 20_000n };
   assert.equal(topHold(old, 8, 8), (220_000n * 64n + 62n) / 63n + 20_000n);
+});
+
+// ---- per-case gas: the plan made from testing every case before a delivery ----
+const CG = { base: 100_000n, perGate: 15_000n, reserve: 20_000n, inlineMax: 30_000_000n, maxCaseGas: 100_000_000n, perRef: 150_000n };
+
+test("planCaseGas: every case fits with the margin -> deliver with the formula", () => {
+  const p = G.planCaseGas(CG, 25, [300_000n, 400_000n, 420_000n]); // 420,000 x 64/63 x 1.1 = 469,334 -> 470,000 <= 475,000
+  assert.equal(p.kind, "formula");
+  assert.equal(p.formula, 475_000n);
+  assert.equal(p.worstCase, 2);
+  assert.deepEqual(p.untested, []);
+});
+
+test("planCaseGas: a case above the formula with the margin -> declare worst x 64/63 + 10%, rounded up", () => {
+  const p = G.planCaseGas(CG, 25, [416_000n, 558_007n, 440_000n]);
+  assert.equal(p.kind, "declare");
+  assert.equal(p.worstCase, 1);
+  assert.equal(p.proposed, 630_000n); // 558,007 x 64/63 x 1.1 = 623,551 -> 630,000
+  assert.equal(G.proposeCaseGas(966_318n), 1_080_000n); // the reviewer's mainnet case
+  // fits the formula, but not with the margin: declare
+  assert.equal(G.planCaseGas(CG, 25, [470_000n]).kind, "declare");
+});
+
+test("planCaseGas: above MAX_CASE_GAS -> tooBig; untested cases are listed, never counted as fitting", () => {
+  assert.equal(G.planCaseGas(CG, 25, [95_000_000n]).kind, "tooBig");
+  const p = G.planCaseGas(CG, 25, [100_000n, null, 200_000n, null]);
+  assert.deepEqual(p.untested, [1, 3]);
+  assert.equal(p.kind, "untested", "never 'formula' (fits) while a case is untested");
+  const none = G.planCaseGas(CG, 25, [null, null]);
+  assert.equal(none.kind, "untested");
+  assert.equal(none.worstCase, -1);
+  assert.equal(G.planCaseGas(CG, 25, [600_000n, null]).kind, "declare", "a tested case that needs more still declares");
+  assert.ok(G.simRetryCap(CG) > (CG.maxCaseGas * 64n) / 63n);
+  assert.deepEqual(none.untested, [0, 1]);
+});
+
+test("needFromEstimate subtracts the call's intrinsic gas", () => {
+  assert.equal(G.intrinsicGas("0x"), 21_000n);
+  assert.equal(G.intrinsicGas("0x0001"), 21_020n);
+  assert.equal(G.needFromEstimate(521_020n, "0x0001"), 500_000n);
+});
+
+test("budgets follow a stored per-case gas: hold, check limit, inline, check transactions, run, top", () => {
+  assert.equal(G.caseBudget(CG, 25), 475_000n);
+  assert.equal(G.caseBudget(CG, 25, 0n), 475_000n);
+  assert.equal(G.caseBudget(CG, 25, 600_000n), 600_000n);
+  assert.equal(G.perCaseHold(CG, 25, 600_000n), (600_000n * 64n + 62n) / 63n + 20_000n);
+  assert.ok(G.checkGasLimit(CG, 10, 25, 600_000n) > G.checkGasLimit(CG, 10, 25));
+  assert.equal(G.checksInline(CG, 64, 25), false); // 64 x 475,000 = 30.4M
+  assert.equal(G.checksInline(CG, 4, 25, 7_000_000n), true);
+  assert.equal(G.checksInline(CG, 4, 25, 7_600_000n), false);
+  assert.ok(G.checkTxCount(CG, 64, 25, 100_000_000n) === 64, "100M per case: one case per check transaction");
+  assert.ok(G.checkTxCount(CG, 64, 25) === 1);
+  assert.ok(G.runGasLimit(CG, 25, 900_000n) > G.runGasLimit(CG, 25));
+  // top: what a piece's declared gas adds above its formula is added to the top's hold
+  const plain = G.runTopGasLimit(CG, [{ gates: 25, nIn: 6 }], 25);
+  const raised = G.runTopGasLimit(CG, [{ gates: 25, nIn: 6, caseGas: 900_000n }], 25);
+  assert.ok(raised - plain >= ((900_000n - 475_000n) * 64n) / 63n, "the top's run gas covers the piece's extra");
 });

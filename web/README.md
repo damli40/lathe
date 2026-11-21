@@ -48,6 +48,18 @@ Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mon
   `evalBudget * 64/63 + GAS_RESERVE` before the circuit runs, so a wallet's estimate is too low. The page also
   runs the call first (`eth_call`) and sends nothing if the contract would refuse, for example `WrongAnswer(3)`,
   which it shows as a sentence and a highlighted row.
+- Before a delivery the page tests every case on its own: one `eth_estimateGas` per case, straight to the
+  processor's `eval` (`step` for a memory order), each a fresh simulated transaction, so the circuits it calls are
+  read cold, as for the first case of a check transaction. Estimate minus the call's base cost = what that case
+  needs (`G.needFromEstimate`). Then `G.planCaseGas`: every case fits the standard budget with a 10% margin ->
+  deliver as before; some case needs more -> propose `worst x 64/63 x 1.1` rounded up to 10,000, say what it means
+  for the number of check transactions, and deliver with `deliver(orderId, processor, circuitId, caseGas)`; even
+  100,000,000 is not enough -> say so and keep the deliver button off. A case that does not finish under 48M (then
+  under about 103M, which a public node cuts to 50M again) or fails is listed as "could not test", never as fitting.
+  On a contract without `caseGasOf` the page says the circuit may be rejected and delivers with the formula.
+  Check, run and the crank read the stored figure (`caseGasOf`, `pieceCaseGasOf`) for their gas limits.
+- The create form warns, without blocking, when the deadline is more than 90 days away: an order cannot be
+  cancelled before its deadline.
 - Both public X Layer RPCs run `eth_call` with at most 50,000,000 gas, whatever the call asks for. The page keeps
   every simulation under 48M: `deliver` always fits (at most about 35M inline); a `check` simulation runs only as
   many cases as fit, and when not even one case fits (circuits above 2,995 gates) the check is sent without a test
@@ -163,6 +175,13 @@ node web/test/receipt.mjs
 #    the same waiting for the top and waiting for a piece; Chinese wire text. Checks that no V0 text appears:
 #    table mismatch, zero address, "no delivery", deliver box
 node web/test/pieces.mjs
+
+# 10. Declared per-case gas on a local anvil (mock circuit 5: honest 6-input parity whose first call in a
+#     transaction is dearer): the page tests all 64 cases, proposes a declared gas, delivers with the 4-argument
+#     deliver, and a 7 / 1 / 56 check split pays; the same circuit delivered with the 3-argument deliver is
+#     rejected at case 7 under the 7 / 1 split; a case above 100M is refused before sending; cases that fail in a
+#     test run are "could not test"; a cheap circuit is delivered as before; the far-deadline warning in EN and ZH
+node web/test/casegas.mjs
 ```
 
 `node --test web/test/` also runs `pieces.test.mjs`: the join and piece answers, the wired rule (the fixed join as

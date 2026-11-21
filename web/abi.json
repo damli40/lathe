@@ -183,6 +183,25 @@
  },
  {
   "type": "function",
+  "name": "caseGasOf",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
   "name": "check",
   "inputs": [
    {
@@ -683,6 +702,67 @@
  },
  {
   "type": "function",
+  "name": "deliver",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "processor",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "caseGas",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "deliverPiece",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "pieceIndex",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "processor",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "caseGas",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
   "name": "deliverPiece",
   "inputs": [
    {
@@ -737,7 +817,7 @@
   "name": "deliveries",
   "inputs": [
    {
-    "name": "",
+    "name": "orderId",
     "type": "uint256",
     "internalType": "uint256"
    }
@@ -978,6 +1058,30 @@
  },
  {
   "type": "function",
+  "name": "pieceCaseGasOf",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "i",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
   "name": "pieceMaxGatesOf",
   "inputs": [
    {
@@ -1005,12 +1109,12 @@
   "name": "pieceOf",
   "inputs": [
    {
-    "name": "",
+    "name": "orderId",
     "type": "uint256",
     "internalType": "uint256"
    },
    {
-    "name": "",
+    "name": "i",
     "type": "uint256",
     "internalType": "uint256"
    }
@@ -1625,6 +1729,11 @@
  {
   "type": "error",
   "name": "BuilderRequired",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "CaseGasTooHigh",
   "inputs": []
  },
  {
