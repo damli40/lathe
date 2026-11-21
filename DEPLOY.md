@@ -172,7 +172,7 @@ Fund it with a little real OKB on X Layer for gas. The deploy is **four transact
 
 Decide two values first. Both are fixed forever once deployed (no owner, no upgrade):
 
-- `FEE_RECIPIENT`: the address that receives Lathe's fee. Anyone can call `claimFees()` to send it there. Use an address USD₮0 will not block.
+- `FEE_RECIPIENT`: the address that receives Lathe's fee. Anyone can call `claimFees()` to send it there. Use an address USD₮0 will not block. **Chosen: `0x36599B0286D3c32F934BC8877eeA839D88f3AFFC`, decided 2026-11-21.** Checked that day on X Layer mainnet: a plain wallet (no contract code), `isBlocked` on USD₮0 returns false, and the fork dry run with this address and `FEE_BPS=200` completed (12,763,073 gas estimated).
 - `FEE_BPS`: the fee in basis points (100 = 1%). The contract refuses anything above 500 (5%). **Chosen: 200 (2%), decided 2026-11-21.** A mainnet-fork dry run with `FEE_BPS=200` on 2026-11-21 completed the simulation: 12,762,793 gas estimated for all four transactions, about 0.00051 OKB at 0.02 gwei.
 
 `USDT` is USD₮0, `0x779Ded0c9e1022225f8E0630b35a9b54bE713736` (Task 0's pick). The TapeOut factory `0x1f09DAeFA827f02CBb40967cc91b259763760761` is built into the script.
