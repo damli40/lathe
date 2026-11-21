@@ -55,7 +55,7 @@ export const pitch = {
         },
         {
           title: "A public testnet run, Nov 21 2026",
-          body: "The final contract sent 46 transactions on X Layer testnet and every one went through. Orders were paid, a late order was refunded, and a 4,096-case check finished in 5 transactions. Testnet has no TapeOut, so these used stand-in circuits.",
+          body: "We sent 46 transactions to the final contract on X Layer testnet and every one went through. Orders were paid, a late order was refunded, and a 4,096-case check finished in 5 transactions. Testnet has no TapeOut, so these used stand-in circuits.",
           link: "See the transactions",
         },
         {
@@ -68,7 +68,7 @@ export const pitch = {
     limits: {
       heading: "Known limits",
       items: [
-        "This page makes tables of up to 6 inputs, so 64 cases. The contract also takes bigger rules split into up to 8 pieces, each tested on its own. This page shows those orders but cannot create them yet.",
+        "This page makes tables of up to 6 inputs, so 64 cases. The contract also takes bigger rules split into up to 8 wired pieces, each tested on its own. This page shows those orders but cannot create them yet.",
         "Every order names one builder. Open orders would let anyone copy the honest builder's circuit and deliver it first.",
         "A 3-of-5 multisig owns TapeOut's processor factory and can change it. Lathe records each delivered circuit's gate count and wiring, and refuses to pay if either changes before the check ends. It cannot see a change to the code that runs the circuit.",
         "Lathe has no owner and no admin key. The fee rate is fixed when the contract is deployed and cannot go above 5%.",
@@ -149,7 +149,7 @@ export const pitch = {
         },
         {
           title: "公开测试网运行，2026 年 11 月 21 日",
-          body: "最终版合约在 X Layer 测试网上发送了 46 笔交易，全部成功。订单完成付款，一笔逾期订单已退款，一次 4,096 种情况的检查用 5 笔交易完成。测试网没有 TapeOut，所以用的是替代电路。",
+          body: "我们向 X Layer 测试网上的最终版合约发送了 46 笔交易，全部成功。订单完成付款，一笔逾期订单已退款，一次 4,096 种情况的检查用 5 笔交易完成。测试网没有 TapeOut，所以用的是替代电路。",
           link: "查看交易",
         },
         {
@@ -162,7 +162,7 @@ export const pitch = {
     limits: {
       heading: "已知限制",
       items: [
-        "本页面可创建最多 6 个输入的真值表，也就是 64 种情况。合约还支持把更大的规则拆成最多 8 个部分，每个部分单独测试。本页面可以显示这类订单，但暂时不能创建。",
+        "本页面可创建最多 6 个输入的真值表，也就是 64 种情况。合约还支持把更大的规则拆成最多 8 个连线部分，每个部分单独测试。本页面可以显示这类订单，但暂时不能创建。",
         "每笔订单指定一位开发者。开放订单会让任何人复制诚实开发者的电路并抢先交付。",
         "TapeOut 的处理器工厂由 3/5 多签持有，多签可以修改它。Lathe 会记录交付电路的门数和连线，检查结束前任何一项有变动，就拒绝付款。运行电路的代码如果被改动，Lathe 无法察觉。",
         "Lathe 没有所有者，也没有管理员密钥。费率在部署时固定，最高 5%。",

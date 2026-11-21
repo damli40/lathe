@@ -32,6 +32,11 @@ for (const n of Object.values(NETWORKS)) {
   }
   checked++;
   const problems = [];
+  const chain = BigInt((await (await fetch(n.rpc, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }) })).json()).result);
+  if (chain !== BigInt(n.chainId)) problems.push(`rpc ${n.rpc} is on chain ${chain}, config says ${n.chainId}`);
+  if (!n.token) problems.push("token is not set in config");
+  if (!n.factory) problems.push("factory is not set in config");
   const token = word(await call(n.rpc, n.lathe, "0x2f48ab7d")); // usdt()
   const factory = word(await call(n.rpc, n.lathe, "0xc45a0155")); // factory()
   if (n.token && n.token.toLowerCase() !== token) problems.push(`token is ${n.token}, contract uses ${token}`);

@@ -6,7 +6,7 @@ Pay only when circuits pass.
 
 Order a small TapeOut circuit on X Layer, lock the USDT up front, and the builder gets paid only when the circuit gives the right answer for every possible input. A contract runs the check. No reviewer decides.
 
-Status: entered in X Layer TapeOut Accelerate (deadline Dec 7, 2026). The order contract and the order page are built, including one-bit memory circuits, receipts, input names, and orders made of up to 8 wired pieces, optionally delivered at the end as one top circuit (the page shows pieced orders read-only for now). The wired pieces and the top circuit run on local test chains only so far. The contract runs on X Layer testnet at `0xaf1e479DDA53382D22BE5Dc19c1cc44C1472B6E3` with stand-in circuits, because TapeOut is not on testnet. It is not on mainnet yet. Test records are in [evidence/](evidence/README.md).
+Status: entered in X Layer TapeOut Accelerate (deadline Dec 7, 2026). The order contract and the order page are built, including one-bit memory circuits, receipts, input names, and orders made of up to 8 wired pieces, optionally delivered at the end as one top circuit (the page shows pieced orders read-only for now). Every order kind has run on X Layer testnet, at `0xaf1e479DDA53382D22BE5Dc19c1cc44C1472B6E3`, with stand-in circuits, because TapeOut is not on testnet ([evidence](evidence/2026-11-21-testnet-case-gas.md)). Real TapeOut circuits have run only on a copy of mainnet. It is not on mainnet yet. Test records are in [evidence/](evidence/README.md).
 
 ## The problem
 
@@ -23,6 +23,10 @@ TapeOut already lets a contract run any circuit with `eval`. So a contract can c
 5. **Every output matches: the builder gets paid.** One miss: no payment. If nothing passes by the deadline, the buyer takes the money back.
 
 A passed circuit stays on-chain and anyone can rerun it for free, so any app can check the rule before it relies on it.
+
+![How an order moves: the buyer locks money, the builder mints and delivers a circuit, the contract runs every case on TapeOut, then pays the builder or refunds the buyer. Below: big rules split into pieces, each tested alone, optionally joined by one top circuit.](docs/lathe-flow.png)
+
+The diagram's source is [docs/lathe-flow.excalidraw](docs/lathe-flow.excalidraw); open it at excalidraw.com to edit.
 
 ## Orders made of pieces
 
@@ -69,13 +73,15 @@ Not every wiring can be one top circuit: TapeOut takes a circuit's outputs from 
 | Can the contract read gate count? | Yes, `circuitInfo(id)`. |
 | Cost for a builder to mint a circuit | About 0.0013 OKB plus the gates used. No BEM or FAB needed on existing processors. |
 
-Not yet tested: a contract calling a circuit chosen at claim time inside one transaction (reasoned, not simulated).
+Since tested: the order contract calls a circuit the builder picks at delivery, inside the same transaction, pays when the circuit matches the buyer's table, and refuses the same circuit against a wrong table. This ran on a copy of mainnet with a real TapeOut circuit someone else minted (`test/fork/XorFork.t.sol`).
 
 ## Known limits
 
 - A table covers at most 6 inputs. Bigger rules use pieces: up to 8 with listed wires (two without), each either a table of up to 6 inputs or one of two formulas ("a is at least b", "a plus b") of up to 17 inputs; an order has at most 64 inputs and 64 outputs. Wires cannot carry the constants 0 and 1. The order page shows wired orders but cannot create them yet.
 - Who can change the circuit runner: the processor factory is owned by a 3-of-5 multisig and is not sealed; the circuit beacon's owner is the zero address (read-only check, Nov 15 2026). We have not audited every upgrade path, so Lathe pins and inspects the exact processor before any order takes money.
-- Lathe takes a fee on each paid order. Rate not set.
+- Lathe takes a fee on each paid order. The rate is fixed when the contract is deployed, at most 5%, and is not chosen yet.
+- A memory order takes exactly one memory bit. Circuits with 2 or more memory bits cannot be ordered.
+- The only big rule built and costed so far is the daily cap ([examples/daily-cap.json](examples/daily-cap.json)). Bigger rules in view, such as a payee check of about 33 inputs, have not been built or tested.
 - Every order names its builder. Open orders, where any builder may deliver, come after Dec 7: an open order lets anyone mint a copy of the honest builder's circuit, or wrap it, and deliver first.
 - A processor that returns badly encoded data (from `eval`, `step`, `circuitInfo` or `netlist`) makes `check` revert instead of counting a wrong answer. A delivered order then cannot finish its check: it waits until one day after its deadline, and then the buyer gets a refund. Only TapeOut's factory owners, who can change the processor code, could cause this. A builder cannot: a builder only picks a circuit, not the code that runs it.
 
@@ -86,6 +92,18 @@ Not yet tested: a contract calling a circuit chosen at claim time inside one tra
 - A buyer whose address the token issuer blocks cannot get a refund: the refund is a token transfer to the buyer, and the token refuses it. The money stays in the contract.
 - An order cannot be cancelled before its deadline, even by the buyer and even when nobody has delivered. The money comes back only after the deadline. The order page warns when a deadline is more than 90 days away.
 - A top circuit that references a circuit which itself references others: Lathe checks that the piece circuits are unchanged before every run, but not the circuits those reference. This is the same for a plain order delivered as such a circuit.
+
+## Tests
+
+328 automated tests, all passing on Nov 21 2026:
+
+| Command | What it runs | Count |
+|---|---|---|
+| `forge test --no-match-path 'test/fork/*'` | Contract tests on a local chain | 239 |
+| `forge test --match-path 'test/fork/*'` | Tests on a copy of X Layer mainnet with real TapeOut circuits (needs network) | 36 |
+| `node --test web/test/` | Order page logic | 53 |
+
+The page also has browser runs (a full flow on a local chain, a real circuit on a mainnet copy, the live testnet read without a wallet) listed in [web/README.md](web/README.md). `node web/test/config-live.mjs` checks that the page's settings match the deployed contract; run it after any deploy.
 
 ## Roadmap to Dec 7
 

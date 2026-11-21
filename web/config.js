@@ -1,7 +1,8 @@
 // Network settings for the order tool.
-// To go live on mainnet, fill in `lathe` under mainnet with the deployed LatheOrders address. Nothing else changes:
-// the page reads the token (and its decimals and symbol), the gas constants, the grace period and the fee rate
-// (feeBps) from that contract.
+// To go live on mainnet, fill in `lathe` under mainnet with the deployed LatheOrders address. The page reads the
+// token (and its decimals and symbol), the gas constants, the grace period and the fee rate (feeBps) from that
+// contract. `token`, `factory` and `processor` below are only checks and form defaults: after any deploy or
+// redeploy, run `node web/test/config-live.mjs`, which fails if they no longer match the contract.
 
 export const VIEM_URL = "https://esm.sh/viem@2.21.0";
 

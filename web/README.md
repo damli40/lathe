@@ -142,6 +142,9 @@ node web/test/fork.mjs
 # 4. Read-only against the live testnet contract, no wallet: orders 1, 2, 3 = Paid, Open, Refunded
 node web/test/readonly.mjs
 
+# 4b. Read-only: config.js token, factory and processor match each deployed contract (run after every deploy)
+node web/test/config-live.mjs
+
 # 5. Fix-round checks through a proxy that caps eth_call at 50M gas like the public nodes: 4,000-gate circuit
 #    checked to Paid, clipped simulation, reverted check, account switch mid-read, receipt not readable,
 #    wrong-network bar, ticking gates, commas, fee line, outputs field, grid keys, at most one request in flight
