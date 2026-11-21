@@ -12,6 +12,9 @@ import {MockUSDT} from "../test/mocks/MockUSDT.sol";
 ///   - MockFactory + MockProcessor, with two circuits owned by the deployer:
 ///       circuit 1 = honest 2-input XOR (answers 0,1,1,0), 4 gates;
 ///       circuit 2 = deliberately wrong (answers 0,1,1,1, i.e. OR), 4 gates;
+///       circuit 3 = honest toggle with one memory bit: 1 input, 1 output, 1 memory bit, 4 gates. Case c has
+///         x0 = c & 1 and memory s = c >> 1; new memory = s XOR x0, output = new memory (table 0x3c);
+///       circuit 4 = the same toggle, wrong in case 3 only (x0 = 1, s = 1: new memory 1 instead of 0);
 ///   - LatheOrders pointing at the mock factory and MockUSDT, fee 1% to the deployer.
 /// This proves the order contract's own logic only. Real TapeOut circuits are proven by the fork tests.
 /// The mocks reuse test/mocks so there is one copy of them. Their setters have no access control: fine for a
@@ -19,6 +22,8 @@ import {MockUSDT} from "../test/mocks/MockUSDT.sol";
 contract DeployTestnet is Script {
     uint256 public constant XOR_ID = 1;
     uint256 public constant WRONG_ID = 2;
+    uint256 public constant TOGGLE_ID = 3;
+    uint256 public constant WRONG_TOGGLE_ID = 4;
     uint16 public constant TESTNET_FEE_BPS = 100;
     uint256 public constant MINT = 1_000e6;
 
@@ -49,6 +54,25 @@ contract DeployTestnet is Script {
         processor.setCircuit(WRONG_ID, deployer, 2, 1, 0, 4);
         processor.setOuts(WRONG_ID, wrongOuts);
 
+        // step answers: outputs and new memory per case c = x0 + 2*s
+        bytes[] memory tog = new bytes[](4);
+        tog[0] = hex"00";
+        tog[1] = hex"01";
+        tog[2] = hex"01";
+        tog[3] = hex"00";
+        processor.setCircuit(TOGGLE_ID, deployer, 1, 1, 1, 4);
+        processor.setOuts(TOGGLE_ID, tog);
+        processor.setNewStates(TOGGLE_ID, tog);
+
+        bytes[] memory wrongState = new bytes[](4);
+        wrongState[0] = hex"00";
+        wrongState[1] = hex"01";
+        wrongState[2] = hex"01";
+        wrongState[3] = hex"01"; // case 3: memory 1 flipped by x0 = 1 should be 0
+        processor.setCircuit(WRONG_TOGGLE_ID, deployer, 1, 1, 1, 4);
+        processor.setOuts(WRONG_TOGGLE_ID, tog);
+        processor.setNewStates(WRONG_TOGGLE_ID, wrongState);
+
         LatheOrders lathe = new LatheOrders(address(factory), address(usdt), deployer, TESTNET_FEE_BPS);
         usdt.mint(deployer, MINT);
         vm.stopBroadcast();
@@ -59,5 +83,7 @@ contract DeployTestnet is Script {
         console2.log("PROCESSOR", address(processor));
         console2.log("XOR_ID", XOR_ID);
         console2.log("WRONG_ID", WRONG_ID);
+        console2.log("TOGGLE_ID", TOGGLE_ID);
+        console2.log("WRONG_TOGGLE_ID", WRONG_TOGGLE_ID);
     }
 }

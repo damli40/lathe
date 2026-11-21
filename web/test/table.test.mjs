@@ -96,3 +96,54 @@ test("16 outputs, 64 cases round-trips", () => {
   assert.equal(t.length, 128);
   assert.deepEqual(decodeTable(6, 16, t), a);
 });
+
+// ---- one memory bit (V1). Vectors copied from test/LatheOrders.state.t.sol.
+import { caseCount, stateBit } from "../table.js";
+
+test("memory: 2^(nIn + nState) cases, state bit sits above the inputs", () => {
+  assert.equal(caseCount(4, 1), 32);
+  assert.equal(caseCount(2), 4);
+  assert.equal(stateBit(16, 4), 1);
+  assert.equal(stateBit(15, 4), 0);
+});
+
+test("memory: breaker table = a8a8a9a9aaa8aaa9 (test_state_breakerTableBytes)", () => {
+  const answers = [];
+  for (let c = 0; c < 32; c++) {
+    const i = c & 15;
+    const tripped = c >> 4;
+    const nt = (tripped & (1 - ((i >> 2) & 1))) | (i & 1) | ((i >> 1) & 1);
+    const power = ((i >> 3) & 1) & (1 - nt);
+    answers.push(power | (nt << 1)); // outputs low, new memory above
+  }
+  const hex = toHex(encodeTable(4, 1, answers, 1));
+  assert.equal(hex, "0xa8a8a9a9aaa8aaa9");
+  assert.deepEqual(decodeTable(4, 1, fromHex(hex), 1), answers);
+});
+
+test("memory: the no-input toggle of test_state_noInputs_toggle (output = old memory) is 0x06", () => {
+  assert.equal(toHex(encodeTable(0, 1, [2, 1], 1)), "0x06");
+  assert.deepEqual(decodeTable(0, 1, fromHex("0x06"), 1), [2, 1]);
+});
+
+test("memory: toggle preset (output = new memory): no inputs = 0x03, one input = 0x3c", () => {
+  assert.deepEqual(presetAnswers("toggle", 0, 1), [3, 0]);
+  assert.equal(toHex(encodeTable(0, 1, presetAnswers("toggle", 0, 1), 1)), "0x03");
+  // x0 = 1 flips the memory: cases (x0,s) 00 -> 0, 10 -> 3, 01 -> 3, 11 -> 0
+  assert.deepEqual(presetAnswers("toggle", 1, 1), [0, 3, 3, 0]);
+  assert.equal(toHex(encodeTable(1, 1, presetAnswers("toggle", 1, 1), 1)), "0x3c");
+});
+
+test("memory: input presets ignore the memory bit and leave new memory 0", () => {
+  assert.deepEqual(presetAnswers("xor", 2, 1), [0, 1, 1, 0, 0, 1, 1, 0]);
+  assert.deepEqual(presetAnswers("and", 2, 1), [0, 0, 0, 1, 0, 0, 0, 1]);
+});
+
+test("memory: shape errors match the contract (test_state_* in LatheOrders.state.t.sol)", () => {
+  assert.equal(tableProblem(0, 1, fromHex("0x16"), 1), "TablePaddingNotZero");
+  assert.equal(tableProblem(0, 1, fromHex("0x06"), 1), null);
+  assert.equal(tableProblem(4, 1, new Uint8Array(4), 1), "WrongTableLength");
+  assert.equal(tableProblem(2, 1, new Uint8Array(6), 2), "UnsupportedStateBits");
+  assert.equal(tableProblem(6, 1, new Uint8Array(32), 1), "TooManyCases");
+  assert.throws(() => encodeTable(6, 1, new Array(128).fill(0), 1));
+});

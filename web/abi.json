@@ -229,6 +229,60 @@
  },
  {
   "type": "function",
+  "name": "createStatefulOrder",
+  "inputs": [
+   {
+    "name": "nIn",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "nOut",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "nState",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "table",
+    "type": "bytes",
+    "internalType": "bytes"
+   },
+   {
+    "name": "amount",
+    "type": "uint96",
+    "internalType": "uint96"
+   },
+   {
+    "name": "deadline",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "builder",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "maxGates",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
   "name": "deliver",
   "inputs": [
    {
@@ -757,6 +811,11 @@
  {
   "type": "error",
   "name": "TooManyOutputs",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "UnsupportedStateBits",
   "inputs": []
  },
  {

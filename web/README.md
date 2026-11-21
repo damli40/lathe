@@ -54,6 +54,10 @@ Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mon
 - A transaction that is mined but fails is reported as a failure, never as progress. If the hash is known but the
   receipt cannot be read, the page says so and names the hash; the create button stays locked until the receipt
   turns up.
+- Memory orders (one memory bit, `createStatefulOrder`): the Memory switch on the create form doubles the cases and
+  adds two columns to the grid. `s` is the memory a case starts with (the case number's bit above the inputs);
+  `s′` is the memory the circuit must leave, packed above the outputs in each answer (`table.js`, `TableLib.sol`).
+  The contract checks these orders with the circuit's `step` function instead of `eval`.
 - Claim fees is left out on purpose: `claimFees()` sends fees to the fixed fee recipient, so it is no use to a visitor.
 - Explorer links: none. When checked on 2026-11-21, neither OKLink nor the OKX explorer resolved a known chain-1952
   transaction, so hashes are shown as copyable text. Set `explorerTx` in `config.js` once a format is confirmed.
@@ -87,6 +91,11 @@ node web/test/fixround.mjs
 
 # 6. Screenshots at 1440x900 and 390x844, dark and light, EN and ZH; fails on horizontal scroll
 SHOTS_DIR=/tmp/lathe-shots node web/test/shots.mjs
+
+# 7. Memory circuits on a local anvil: 1 input + 1 memory bit, Toggle preset (table 0x3c, s and s′ columns);
+#    honest toggle circuit 3 = Paid; circuit 4 (new memory wrong in case 3) = refusal naming x0=1 s=1, row 3
+#    highlighted, nothing sent; a memory-free circuit on a memory order = shape mismatch in the read-out
+node web/test/memory.mjs
 ```
 
 The browser tests turn off the page's CSP (`bypassCSP`) only so the testnet or mainnet entry can point at

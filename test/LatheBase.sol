@@ -76,4 +76,29 @@ abstract contract LatheBase is Test {
         }
         proc.setOuts(id, o);
     }
+
+    /// Register memory circuit `id` answering a stateful `table` exactly: case c's answer is nOut + nState bits,
+    /// outputs low, new state above (TableLib).
+    function setStatefulCircuitFromTable(
+        uint256 id,
+        address who,
+        uint8 nIn,
+        uint8 nOut,
+        uint8 nState,
+        bytes memory table,
+        uint32 gates
+    ) internal {
+        proc.setCircuit(id, who, nIn, nOut, nState, gates);
+        uint256 cases = uint256(1) << (uint256(nIn) + nState);
+        uint256 w = uint256(nOut) + nState;
+        bytes[] memory o = new bytes[](cases);
+        bytes[] memory s = new bytes[](cases);
+        for (uint256 c = 0; c < cases; ++c) {
+            uint256 a = TableLib.expected(table, c, w);
+            o[c] = BitLib.pack(a, nOut);
+            s[c] = BitLib.pack(a >> nOut, nState);
+        }
+        proc.setOuts(id, o);
+        proc.setNewStates(id, s);
+    }
 }

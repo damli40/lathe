@@ -15,8 +15,9 @@ export async function connect(page) {
 }
 
 /** Fill the create form and run approve + create. Returns the new order id (string). */
-export async function createOrder(page, { preset = "xor", amount = "1", builder = "mine", deadline = null, nIn = null } = {}) {
+export async function createOrder(page, { preset = "xor", amount = "1", builder = "mine", deadline = null, nIn = null, memory = null } = {}) {
   await page.click("#tab-create");
+  if (memory !== null) await page.click(`#mem-seg [data-nstate="${memory}"]`);
   if (nIn) await page.click(`#nin-seg button:nth-child(${nIn})`);
   await page.click(`#preset-row [data-preset="${preset}"]`);
   await page.fill("#f-amount", amount);

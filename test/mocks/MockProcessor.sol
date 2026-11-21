@@ -12,6 +12,7 @@ contract MockFactory {
 
 /// @notice Stands in for a TapeOut processor. Each circuit id answers `eval` from a stored list:
 /// the answer for input bytes `x` is `outs[id][x read as an LSB-first number]`.
+/// `step` (memory circuits) answers case c = inputs + (state << nIn) with (newStates[id][c], outs[id][c]).
 contract MockProcessor {
     struct Info {
         uint32 nIn;
@@ -24,6 +25,7 @@ contract MockProcessor {
     mapping(uint256 => bytes) internal net;
     mapping(uint256 => address) internal owner;
     mapping(uint256 => bytes[]) internal outs;
+    mapping(uint256 => bytes[]) internal newStates;
     mapping(uint256 => bool) public revertEval;
     mapping(uint256 => bool) public burnGasEval;
     mapping(uint256 => uint256) public evalGasCost; // extra gas eval burns before answering (0 = none)
@@ -39,6 +41,17 @@ contract MockProcessor {
         for (uint256 i = 0; i < o.length; ++i) {
             outs[id].push(o[i]);
         }
+    }
+
+    function setNewStates(uint256 id, bytes[] calldata s) external {
+        delete newStates[id];
+        for (uint256 i = 0; i < s.length; ++i) {
+            newStates[id].push(s[i]);
+        }
+    }
+
+    function setNewState(uint256 id, uint256 c, bytes calldata s) external {
+        newStates[id][c] = s;
     }
 
     function setOut(uint256 id, uint256 c, bytes calldata o) external {
@@ -86,6 +99,29 @@ contract MockProcessor {
     }
 
     function eval(uint256 id, bytes calldata inputs) external view returns (bytes memory) {
+        _burn(id);
+        require(info[id].nState == 0, "has latch: use step");
+        return outs[id][_num(inputs)];
+    }
+
+    /// One tick of a memory circuit. Same failure switches as eval.
+    function step(uint256 id, bytes calldata state, bytes calldata inputs)
+        external
+        view
+        returns (bytes memory newState, bytes memory outputs)
+    {
+        _burn(id);
+        uint256 c = _num(inputs) | (_num(state) << info[id].nIn);
+        return (newStates[id][c], outs[id][c]);
+    }
+
+    function _num(bytes calldata b) internal pure returns (uint256 c) {
+        for (uint256 i = 0; i < b.length; ++i) {
+            c |= uint256(uint8(b[i])) << (8 * i);
+        }
+    }
+
+    function _burn(uint256 id) internal view {
         require(!revertEval[id], "eval reverted");
         if (burnGasEval[id]) {
             // Spin until out of gas, like a circuit far too big for the gas given.
@@ -100,11 +136,5 @@ contract MockProcessor {
             uint256 stopAt = gasleft() > cost ? gasleft() - cost : 0;
             while (gasleft() > stopAt) {}
         }
-        require(info[id].nState == 0, "has latch: use step");
-        uint256 c;
-        for (uint256 i = 0; i < inputs.length; ++i) {
-            c |= uint256(uint8(inputs[i])) << (8 * i);
-        }
-        return outs[id][c];
     }
 }

@@ -109,6 +109,7 @@ contract LatheOrders is ReentrancyGuard {
     error GraceOver();
     error NotBuyer();
     error RefundNotAllowed();
+    error UnsupportedStateBits();
 
     constructor(address factory_, address usdt_, address feeRecipient_, uint16 feeBps_) {
         if (feeBps_ > MAX_FEE_BPS) revert FeeTooHigh();
@@ -132,6 +133,26 @@ contract LatheOrders is ReentrancyGuard {
         uint32 maxGates
     ) external nonReentrant returns (uint256 orderId) {
         return _create(nIn, nOut, 0, table, amount, deadline, builder, maxGates);
+    }
+
+    /// @notice Lock `amount` for a memory circuit: `nIn` inputs, `nOut` outputs and `nState` memory bits, checked
+    /// with TapeOut's `step`. Only nState == 1 is offered (use createOrder for no memory).
+    /// Packing: the table has 2^(nIn + nState) cases. Case c's inputs are c & (2^nIn - 1) (the low bits of c) and
+    /// its starting state is c >> nIn (the bits above). Its expected answer is nOut + nState bits: the outputs in
+    /// the low nOut bits, the new state in the nState bits above them. Answers are concatenated LSB first, so case
+    /// c's answer starts at table bit c * (nOut + nState). See TableLib.
+    function createStatefulOrder(
+        uint8 nIn,
+        uint8 nOut,
+        uint8 nState,
+        bytes calldata table,
+        uint96 amount,
+        uint64 deadline,
+        address builder,
+        uint32 maxGates
+    ) external nonReentrant returns (uint256 orderId) {
+        if (nState != 1) revert UnsupportedStateBits();
+        return _create(nIn, nOut, nState, table, amount, deadline, builder, maxGates);
     }
 
     function _create(
@@ -214,7 +235,7 @@ contract LatheOrders is ReentrancyGuard {
 
     /// @dev Small circuit: check every case now and pay. Any wrong answer reverts the whole delivery.
     function _checkInlineIfSmall(uint256 orderId, Order storage o, uint256 gates) internal {
-        uint256 total = uint256(1) << o.nIn;
+        uint256 total = _cases(o);
         uint256 budget = evalBudget(gates);
         if (total * budget > INLINE_CHECK_MAX_GAS) return;
         Delivery storage d = deliveries[orderId];
@@ -235,7 +256,7 @@ contract LatheOrders is ReentrancyGuard {
         Delivery storage d = deliveries[orderId];
         _requireUnchanged(o, d);
 
-        uint256 total = uint256(1) << o.nIn;
+        uint256 total = _cases(o);
         uint256 start = d.nextCase;
         uint256 end = maxCases >= total - start ? total : start + maxCases;
 
@@ -300,6 +321,11 @@ contract LatheOrders is ReentrancyGuard {
         return EVAL_BASE_GAS + EVAL_GAS_PER_GATE * gateCount;
     }
 
+    /// @dev Every order has 2^(nIn + nState) cases (memory bits count as inputs to the table).
+    function _cases(Order storage o) internal view returns (uint256) {
+        return uint256(1) << (uint256(o.nIn) + o.nState);
+    }
+
     /// @dev Run cases [from, to). Returns (true, to) if all match, else (false, first wrong case).
     function _runCases(
         Order storage o,
@@ -309,37 +335,79 @@ contract LatheOrders is ReentrancyGuard {
         uint256 to,
         uint256 budget
     ) internal view returns (bool, uint256) {
-        // V0 orders have no memory bits: cases = 2^nIn, answers are nOut bits, eval not step. V1 (memory) needs
-        // step() and 2^(nIn+nState) cases with nOut+nState-bit answers; this loop must not be reused for it as is.
-        assert(o.nState == 0);
-        IProcessor p = IProcessor(d.processor);
-        uint256 id = d.circuitId;
+        uint256 w = uint256(o.nOut) + o.nState;
         for (uint256 c = from; c < to; ++c) {
-            if (!_caseMatches(p, id, c, o.nIn, o.nOut, table, budget)) return (false, c);
+            if (!_caseMatches(d, c, o, table, w, budget)) return (false, c);
         }
         return (true, to);
     }
 
-    /// @dev One case. eval gets exactly `budget` gas. If the caller cannot give it that much, the whole call
-    /// reverts and nothing is recorded. A revert inside eval (including running out of the budget) or a short
-    /// output is a wrong answer: it is the circuit's own fault and the same for every caller.
+    /// @dev The circuit's answer to case c, packed the way the table packs it: outputs in the low nOut bits, new
+    /// state in the nState bits above. Inputs are c & (2^nIn - 1), state is c >> nIn, each packed LSB first.
+    /// No memory: eval(id, inputs). Memory: step(id, state, inputs). The call gets exactly `budget` gas. If the
+    /// caller cannot give it that much, the whole call reverts and nothing is recorded. A revert inside the call
+    /// (including running out of the budget) or a short return is ok == false, a wrong answer: it is the circuit's
+    /// own fault and the same for every caller. Padding bits above nOut and above nState are ignored.
     function _caseMatches(
-        IProcessor p,
-        uint256 id,
+        Delivery storage d,
         uint256 c,
-        uint256 nIn,
-        uint256 nOut,
+        Order storage o,
         bytes memory table,
+        uint256 w,
         uint256 budget
     ) internal view returns (bool) {
-        bytes memory inputs = BitLib.pack(c, nIn);
-        // A call can pass on at most 63/64 of the gas left (EIP-150); keep enough so eval gets all of `budget`.
+        (bool ok, uint256 got) = _answer(IProcessor(d.processor), d.circuitId, c, o, budget);
+        return ok && got == TableLib.expected(table, c, w);
+    }
+
+    function _answer(IProcessor p, uint256 id, uint256 c, Order storage o, uint256 budget)
+        internal
+        view
+        returns (bool, uint256)
+    {
+        bytes memory inputs = BitLib.pack(c, o.nIn); // pack keeps only the low nIn bits
+        bytes memory state = BitLib.pack(c >> o.nIn, o.nState); // empty when there is no memory
+        // A call can pass on at most 63/64 of the gas left (EIP-150); keep enough so the call gets all of `budget`.
         if (gasleft() < budget * 64 / 63 + GAS_RESERVE) revert InsufficientGasForCase();
+        if (state.length == 0) return _evalAnswer(p, id, inputs, o.nOut, budget);
+        return _stepAnswer(p, id, state, inputs, o, budget);
+    }
+
+    function _evalAnswer(IProcessor p, uint256 id, bytes memory inputs, uint256 nOut, uint256 budget)
+        internal
+        view
+        returns (bool, uint256)
+    {
         try p.eval{gas: budget}(id, inputs) returns (bytes memory out) {
-            if (out.length < (nOut + 7) / 8) return false;
-            return BitLib.lowBits(out, nOut) == TableLib.expected(table, c, nOut);
+            if (out.length < (nOut + 7) / 8) return (false, 0);
+            return (true, BitLib.lowBits(out, nOut));
         } catch {
-            return false;
+            return (false, 0);
         }
+    }
+
+    function _stepAnswer(
+        IProcessor p,
+        uint256 id,
+        bytes memory state,
+        bytes memory inputs,
+        Order storage o,
+        uint256 budget
+    ) internal view returns (bool, uint256) {
+        try p.step{gas: budget}(id, state, inputs) returns (bytes memory newState, bytes memory out) {
+            return _packStep(newState, out, o.nOut, o.nState);
+        } catch {
+            return (false, 0);
+        }
+    }
+
+    /// @dev outputs low, new state above; too few bytes in either is a wrong answer.
+    function _packStep(bytes memory newState, bytes memory out, uint256 nOut, uint256 nState)
+        internal
+        pure
+        returns (bool, uint256)
+    {
+        if (out.length < (nOut + 7) / 8 || newState.length < (nState + 7) / 8) return (false, 0);
+        return (true, BitLib.lowBits(out, nOut) | (BitLib.lowBits(newState, nState) << nOut));
     }
 }

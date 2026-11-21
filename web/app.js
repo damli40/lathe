@@ -48,7 +48,7 @@ const state = {
   account: null,
   walletChainId: null,
   walletMsg: null,
-  form: { nIn: 2, nOut: 1, answers: T.presetAnswers("xor", 2), maxGatesTouched: false, approved: false, allowance: null, balance: null, steps: {}, result: null },
+  form: { nIn: 2, nOut: 1, nState: 0, answers: T.presetAnswers("xor", 2), maxGatesTouched: false, approved: false, allowance: null, balance: null, steps: {}, result: null },
   view: null, // { id, loading, data, error, inputs, preview, msgs, failedCase, busy }
   tab: "create",
 };
@@ -129,9 +129,11 @@ function fmtDur(sec) {
 function short(a) {
   return a ? a.slice(0, 6) + "…" + a.slice(-4) : "";
 }
-function inputsLabel(c, nIn) {
+// "x0=1 x1=0", then the memory the case starts with: "s=1".
+function inputsLabel(c, nIn, nState = 0) {
   const out = [];
   for (let k = 0; k < nIn; k++) out.push(`x${k}=${T.inputBit(c, k)}`);
+  for (let k = 0; k < nState; k++) out.push(`s=${T.stateBit(c, nIn, k)}`);
   return out.join(" ");
 }
 function sameAddr(a, b) {
@@ -635,7 +637,7 @@ function explain(err, ctx = {}) {
   if (name && strings.en.tool.errors[name]) {
     if (name === "WrongAnswer") {
       const c = Number(args[0]);
-      return { name, caseIndex: c, text: txt("tool.errors.WrongAnswer", { c, inputs: inputsLabel(c, ctx.nIn ?? 0) }) };
+      return { name, caseIndex: c, text: txt("tool.errors.WrongAnswer", { c, inputs: inputsLabel(c, ctx.nIn ?? 0, ctx.nState ?? 0) }) };
     }
     if (name === "InsufficientGasForCase" && ctx.action === "deliver") return { name, text: txt("tool.errors.InsufficientGasForCaseDeliver") };
     return { name, text: txt("tool.errors." + name) };
@@ -749,7 +751,7 @@ function renderTool() {
 function defaultMaxGates() {
   const i = info();
   if (!i) return 0;
-  return G.maxInlineGates(i, T.caseCount(state.form.nIn));
+  return G.maxInlineGates(i, T.caseCount(state.form.nIn, state.form.nState));
 }
 
 function renderCreate() {
@@ -771,18 +773,24 @@ function renderCreate() {
   const i = info();
   const f = state.form;
 
-  // inputs 1..maxCaseBits
+  // inputs 1..maxCaseBits, one fewer with a memory bit (the memory bit counts towards the case limit)
   const seg = clear($("#nin-seg"));
   seg.classList.add("mono");
-  for (let k = 1; k <= Math.min(T.MAX_INPUTS, i.maxCaseBits); k++) {
+  for (let k = 1; k <= maxInputs(); k++) {
     seg.appendChild(el("button", { type: "button", "aria-pressed": String(k === f.nIn), "aria-describedby": "nin-help", text: String(k), on: { click: () => setNIn(k) } }));
   }
-  const maxOut = Math.min(T.MAX_OUTPUTS, i.maxAnswerBits);
+  setText("#nin-note", f.nState ? txt("tool.create.inputsMaxState") : "");
+  const mem = clear($("#mem-seg"));
+  for (const k of [0, 1]) {
+    mem.appendChild(el("button", { type: "button", "aria-pressed": String(k === f.nState), "aria-describedby": "mem-help", "data-nstate": k, text: txt(k ? "tool.create.memoryOne" : "tool.create.memoryNone"), on: { click: () => setNState(k) } }));
+  }
+  $("#table-help-state").hidden = !f.nState;
+  const maxOut = maxOutputs();
   $("#f-nout").max = String(maxOut);
   setText("#nout-help", txt("tool.create.outputsHelp", { max: maxOut }));
 
   const pr = clear($("#preset-row"));
-  for (const p of ["xor", "and", "or", "majority", "clear"]) {
+  for (const p of f.nState ? ["xor", "and", "or", "majority", "toggle", "clear"] : ["xor", "and", "or", "majority", "clear"]) {
     pr.appendChild(el("button", { type: "button", class: "btn btn-quiet btn-sm", "data-preset": p, text: txt("tool.create.presets." + p), on: { click: () => applyPreset(p) } }));
   }
 
@@ -811,7 +819,7 @@ function setNIn(k) {
   const f = state.form;
   if (f.nIn === k) return;
   f.nIn = k;
-  f.answers = new Array(T.caseCount(k)).fill(0);
+  f.answers = new Array(T.caseCount(k, f.nState)).fill(0);
   if (!f.maxGatesTouched) $("#f-maxgates").value = String(defaultMaxGates());
   f.focusCell = null;
   for (const [idx, b] of $$("#nin-seg button").entries()) b.setAttribute("aria-pressed", String(idx + 1 === k));
@@ -820,14 +828,34 @@ function setNIn(k) {
   validateAll(false);
 }
 
+// Memory bit on or off. The table changes shape (twice the cases, one more answer column), so it starts empty.
+// The memory bit counts towards both limits: inputs + memory <= 6, outputs + memory <= 16.
+function setNState(k) {
+  const f = state.form;
+  if (f.nState === k) return;
+  f.nState = k;
+  if (f.nIn > maxInputs()) f.nIn = maxInputs();
+  if (f.nOut > maxOutputs()) {
+    f.nOut = maxOutputs();
+    $("#f-nout").value = String(f.nOut);
+  }
+  f.answers = new Array(T.caseCount(f.nIn, k)).fill(0);
+  f.focusCell = null;
+  if (!f.maxGatesTouched) $("#f-maxgates").value = String(defaultMaxGates());
+  renderCreate();
+}
+
 function applyPreset(p) {
   const f = state.form;
-  f.answers = p === "clear" ? new Array(T.caseCount(f.nIn)).fill(0) : T.presetAnswers(p, f.nIn);
+  f.answers = p === "clear" ? new Array(T.caseCount(f.nIn, f.nState)).fill(0) : T.presetAnswers(p, f.nIn, f.nState, f.nOut);
   renderTable();
 }
 
+function maxInputs() {
+  return Math.min(T.MAX_INPUTS, info()?.maxCaseBits ?? 6) - state.form.nState;
+}
 function maxOutputs() {
-  return Math.min(T.MAX_OUTPUTS, info()?.maxAnswerBits ?? 16);
+  return Math.min(T.MAX_OUTPUTS, info()?.maxAnswerBits ?? 16) - state.form.nState;
 }
 function readOutputs() {
   const v = $("#f-nout").value.trim();
@@ -842,10 +870,13 @@ function applyOutputs() {
   if (r.error) return false;
   const f = state.form;
   if (r.value === f.nOut) return true;
+  // Answers hold the outputs in the low nOut bits and the new memory above them, so the memory bit moves.
   const mask = 2 ** r.value - 1;
-  const lost = r.value < f.nOut && f.answers.some((a) => (a & ~mask) !== 0);
+  const outMask = 2 ** f.nOut - 1;
+  const lost = r.value < f.nOut && f.answers.some((a) => (a & outMask & ~mask) !== 0);
+  const old = f.nOut;
   f.nOut = r.value;
-  f.answers = f.answers.map((a) => a & mask);
+  f.answers = f.answers.map((a) => (a & outMask & mask) | ((a >> old) << r.value));
   setText("#nout-note", lost ? txt("tool.create.outputsCleared", { from: r.value }) : "");
   renderTable();
   validateAll(touched.has("nout"));
@@ -867,7 +898,7 @@ $("#f-nout").addEventListener("blur", () => {
 function renderMaxGatesHelp() {
   const i = info();
   if (!i) return;
-  setText("#maxgates-help", txt("tool.create.maxGatesHelp", { g: fmtInt(defaultMaxGates()), cases: T.caseCount(state.form.nIn) }));
+  setText("#maxgates-help", txt("tool.create.maxGatesHelp", { g: fmtInt(defaultMaxGates()), cases: T.caseCount(state.form.nIn, state.form.nState) }));
   // Big circuits: checked in several transactions, and above maxSimGates a check cannot be simulated through the
   // public node (its eth_call gas cap), so the page sends it untested.
   const g = readMaxGates();
@@ -879,8 +910,8 @@ function renderMaxGatesHelp() {
 function renderTable() {
   const f = state.form;
   const wrap = clear($("#tt-wrap"));
-  wrap.appendChild(buildTable(f.nIn, f.nOut, f.answers, { editable: true }));
-  setText("#table-hex", T.toHex(T.encodeTable(f.nIn, f.nOut, f.answers)));
+  wrap.appendChild(buildTable(f.nIn, f.nOut, f.answers, { editable: true, nState: f.nState }));
+  setText("#table-hex", T.toHex(T.encodeTable(f.nIn, f.nOut, f.answers, f.nState)));
 }
 
 // Editable grid: one tab stop (roving tabindex). Arrow keys move, Home/End go to the row's ends, Space/Enter
@@ -892,13 +923,14 @@ function gridKeys(table) {
     const f = state.form;
     let c = Number(b.dataset.c);
     let k = Number(b.dataset.k);
-    const cases = T.caseCount(f.nIn);
+    const cases = T.caseCount(f.nIn, f.nState);
+    const w = f.nOut + f.nState; // answer columns: outputs, then the new memory
     if (e.key === "ArrowDown") c = Math.min(cases - 1, c + 1);
     else if (e.key === "ArrowUp") c = Math.max(0, c - 1);
-    else if (e.key === "ArrowRight") k = Math.min(f.nOut - 1, k + 1);
+    else if (e.key === "ArrowRight") k = Math.min(w - 1, k + 1);
     else if (e.key === "ArrowLeft") k = Math.max(0, k - 1);
     else if (e.key === "Home") k = 0;
-    else if (e.key === "End") k = f.nOut - 1;
+    else if (e.key === "End") k = w - 1;
     else if (e.key === "PageDown") c = Math.min(cases - 1, c + 8);
     else if (e.key === "PageUp") c = Math.max(0, c - 8);
     else return;
@@ -912,23 +944,30 @@ function gridKeys(table) {
   });
 }
 
-function buildTable(nIn, nOut, answers, { editable, failedCase = null }) {
-  const fc = state.form.focusCell && state.form.focusCell.c < T.caseCount(nIn) && state.form.focusCell.k < nOut ? state.form.focusCell : { c: 0, k: 0 };
+// Columns: case number, inputs x0.., the memory the case starts with (s), outputs y0.., the new memory (s′).
+// Answer bit k < nOut is output y_k; bit nOut is the new memory (TableLib: outputs low, new memory above).
+function buildTable(nIn, nOut, answers, { editable, failedCase = null, nState = 0 }) {
+  const w = nOut + nState;
+  const cases = T.caseCount(nIn, nState);
+  const fc = state.form.focusCell && state.form.focusCell.c < cases && state.form.focusCell.k < w ? state.form.focusCell : { c: 0, k: 0 };
   const head = el("tr", {}, el("th", { class: "case", scope: "col", text: txt("tool.create.colCase") }));
   for (let k = 0; k < nIn; k++) head.appendChild(el("th", { scope: "col", class: k === 0 ? "sep" : null, text: `x${k}` }));
+  for (let k = 0; k < nState; k++) head.appendChild(el("th", { scope: "col", class: k === 0 && nIn === 0 ? "sep" : null, text: "s" }));
   for (let k = 0; k < nOut; k++) head.appendChild(el("th", { scope: "col", class: k === 0 ? "sep" : null, text: `y${k}` }));
+  for (let k = 0; k < nState; k++) head.appendChild(el("th", { scope: "col", class: "sep", text: "s′" }));
   if (failedCase !== null) head.appendChild(el("th", { scope: "col" }));
   const body = el("tbody");
-  const cases = T.caseCount(nIn);
+  const cellLabel = (c, k, v) => (k < nOut ? txt("tool.create.cellLabel", { c, k, v }) : txt("tool.create.cellStateLabel", { c, v }));
   for (let c = 0; c < cases; c++) {
     const tr = el("tr", { class: c === failedCase ? "is-failed" : null, "data-case": c });
     tr.appendChild(el("td", { class: "case", text: String(c) }));
     for (let k = 0; k < nIn; k++) tr.appendChild(el("td", { class: "in" + (k === 0 ? " sep" : ""), text: String(T.inputBit(c, k)) }));
-    for (let k = 0; k < nOut; k++) {
+    for (let k = 0; k < nState; k++) tr.appendChild(el("td", { class: "in" + (k === 0 && nIn === 0 ? " sep" : ""), text: String(T.stateBit(c, nIn, k)) }));
+    for (let k = 0; k < w; k++) {
       const bit = (answers[c] >> k) & 1;
-      const td = el("td", { class: k === 0 ? "sep" : null });
+      const td = el("td", { class: k === 0 || k === nOut ? "sep" : null });
       if (editable) {
-        const b = el("button", { type: "button", class: "bit", "data-c": c, "data-k": k, tabindex: c === fc.c && k === fc.k ? "0" : "-1", "aria-pressed": String(!!bit), "aria-label": txt("tool.create.cellLabel", { c, k, v: bit }), text: String(bit) });
+        const b = el("button", { type: "button", class: "bit", "data-c": c, "data-k": k, tabindex: c === fc.c && k === fc.k ? "0" : "-1", "aria-pressed": String(!!bit), "aria-label": cellLabel(c, k, bit), text: String(bit) });
         b.addEventListener("focus", () => {
           state.form.focusCell = { c, k };
           for (const o of b.closest("table").querySelectorAll('button.bit[tabindex="0"]')) if (o !== b) o.tabIndex = -1;
@@ -939,8 +978,8 @@ function buildTable(nIn, nOut, answers, { editable, failedCase = null }) {
           const nb = (state.form.answers[c] >> k) & 1;
           b.textContent = String(nb);
           b.setAttribute("aria-pressed", String(!!nb));
-          b.setAttribute("aria-label", txt("tool.create.cellLabel", { c, k, v: nb }));
-          setText("#table-hex", T.toHex(T.encodeTable(state.form.nIn, state.form.nOut, state.form.answers)));
+          b.setAttribute("aria-label", cellLabel(c, k, nb));
+          setText("#table-hex", T.toHex(T.encodeTable(state.form.nIn, state.form.nOut, state.form.answers, state.form.nState)));
         });
         td.appendChild(b);
       } else {
@@ -1268,7 +1307,11 @@ $("#create-btn").addEventListener("click", async () => {
   const f = state.form;
   const L = net().lathe;
   const key = state.netKey;
-  const table = T.toHex(T.encodeTable(f.nIn, f.nOut, f.answers));
+  const table = T.toHex(T.encodeTable(f.nIn, f.nOut, f.answers, f.nState));
+  // No memory: createOrder. One memory bit: createStatefulOrder, checked with the circuit's step function.
+  const call = f.nState
+    ? { functionName: "createStatefulOrder", args: [f.nIn, f.nOut, f.nState, table, v.amount, v.deadline, v.builder, v.maxGates] }
+    : { functionName: "createOrder", args: [f.nIn, f.nOut, table, v.amount, v.deadline, v.builder, v.maxGates] };
   f.result = null;
   f.steps = { ...f.steps, busy: true, createMsg: null, approveMsg: null };
   renderCreateSend();
@@ -1278,8 +1321,7 @@ $("#create-btn").addEventListener("click", async () => {
       return renderCreateSend();
     }
     const receipt = await send({
-      address: L, abi: state.abi, functionName: "createOrder",
-      args: [f.nIn, f.nOut, table, v.amount, v.deadline, v.builder, v.maxGates],
+      address: L, abi: state.abi, ...call,
       slot: (m) => {
         f.steps.createTx = m;
         renderCreateSend();
@@ -1475,7 +1517,7 @@ function renderOrder() {
   const o = data.order;
   const d = data.delivery;
   const i = info();
-  const cases = T.caseCount(o.nIn);
+  const cases = T.caseCount(o.nIn, o.nState);
   box.setAttribute("data-status", String(o.status));
   const you = (a) => (sameAddr(a, state.account) ? " (" + txt("tool.order.you") + ")" : "");
 
@@ -1495,7 +1537,7 @@ function renderOrder() {
       el("span", { class: "sub", id: "deadline-left", text: leftText(o, now) }))),
     fact("tool.order.buyer", el("span", { class: "mono", text: o.buyer + you(o.buyer) }), true),
     fact("tool.order.builder", el("span", { class: "mono", text: o.builder + you(o.builder) }), true),
-    fact("tool.order.shape", el("span", { text: txt("tool.order.shapeVal", { nIn: o.nIn, nOut: o.nOut, cases }) })),
+    fact("tool.order.shape", el("span", { text: txt(o.nState ? "tool.order.shapeValState" : "tool.order.shapeVal", { nIn: o.nIn, nOut: o.nOut, cases }) })),
     fact("tool.order.maxGates", el("span", { class: "mono", text: o.maxGates ? fmtInt(o.maxGates) : txt("tool.order.noCap") })));
 
   const hasDelivery = d.processor && !/^0x0{40}$/i.test(d.processor);
@@ -1511,13 +1553,13 @@ function renderOrder() {
 
   let answers = null;
   try {
-    answers = T.decodeTable(o.nIn, o.nOut, state.viem.hexToBytes(data.table));
+    answers = T.decodeTable(o.nIn, o.nOut, state.viem.hexToBytes(data.table), o.nState);
   } catch {
     answers = null;
   }
   const tbox = el("div", { class: "create-table" }, el("h4", { class: "label-like", text: txt("tool.order.tableHeading") }));
   if (answers) {
-    const scroller = el("div", { class: "tt-scroll" }, buildTable(o.nIn, o.nOut, answers, { editable: false, failedCase: v.failedCase }));
+    const scroller = el("div", { class: "tt-scroll" }, buildTable(o.nIn, o.nOut, answers, { editable: false, failedCase: v.failedCase, nState: o.nState }));
     tbox.append(scroller);
     tbox.append(el("p", { class: "help bytes-line" }, el("span", { text: txt("tool.create.tableBytes") }), " ", el("code", { class: "mono", text: data.table })));
   }
@@ -1596,7 +1638,7 @@ function deliverBox(o, now) {
     for (const pmsg of problems) box.append(el("p", { class: "msg is-err", text: pmsg }));
     box.append(el("div", { class: "gasinfo" },
       el("p", {}, txt("tool.deliver.budget", { budget: "" }), el("span", { class: "mono", text: fmtInt(pv.budget) })),
-      el("p", { text: pv.inline ? txt("tool.deliver.inlineYes", { cases: T.caseCount(o.nIn) }) : txt("tool.deliver.inlineNo") }),
+      el("p", { text: pv.inline ? txt("tool.deliver.inlineYes", { cases: T.caseCount(o.nIn, o.nState) }) : txt("tool.deliver.inlineNo") }),
       el("p", {}, txt("tool.deliver.gasLimit", { gas: "" }), el("span", { class: "mono", text: fmtInt(pv.gas) })),
       el("p", { text: txt("tool.deliver.gasWhy") }),
       pv.capped ? el("p", { class: "msg is-err", text: txt("tool.deliver.gasCapped") }) : null));
@@ -1665,7 +1707,7 @@ async function readCircuit(o) {
       const ci = await read(inp.processor, state.procAbi, "circuitInfo", [inp.id]);
       const gates = Number(ci[3]);
       const budget = await read(net().lathe, state.abi, "evalBudget", [BigInt(gates)]);
-      const g = G.deliverGasLimit(i, T.caseCount(o.nIn), gates);
+      const g = G.deliverGasLimit(i, T.caseCount(o.nIn, o.nState), gates);
       v.preview = { processor: inp.processor, id: inp.id, isCpu, owner, nIn: Number(ci[0]), nOut: Number(ci[1]), nState: Number(ci[2]), gates, budget, ...g };
     }
   } catch (e) {
@@ -1707,7 +1749,7 @@ async function doDeliver(o) {
     v.busy = false;
     if (afterSendFailure(e, v, "deliverTx", "deliver", key)) return;
     v.msgs.deliverTx = null;
-    const x = explain(e, { nIn: o.nIn, action: "deliver" });
+    const x = explain(e, { nIn: o.nIn, nState: o.nState, action: "deliver" });
     v.msgs.deliver = { err: true, text: x.name === "rejected" || x.name === "wrongChain" ? x.text : x.text + (x.name === "WrongAnswer" || x.name === "NotCircuitOwner" || x.name === "ShapeMismatch" || x.name === "TooManyGates" || x.name === "NotProcessor" ? " " + txt("tool.deliver.refusedNotSent") : "") };
     if (x.name === "WrongAnswer") v.failedCase = x.caseIndex;
     renderOrder();
@@ -1748,7 +1790,7 @@ function checkBox(o, d, now) {
   const v = state.view;
   const i = info();
   const box = el("div", { class: "box", id: "check-box" }, el("h4", { text: txt("tool.check.heading") }));
-  const total = T.caseCount(o.nIn);
+  const total = T.caseCount(o.nIn, o.nState);
   box.append(el("p", { class: "mono", text: txt("tool.order.progressVal", { n: d.nextCase, total }) }));
   if (now > o.deadline + i.grace) {
     box.append(el("p", { class: "help", text: txt("tool.check.graceOver") }));
@@ -1809,7 +1851,7 @@ async function doCheck(o, d, maxN) {
   const k = G.simCases(i, n, d.gateCount);
   const L = net().lathe;
   const key = state.netKey;
-  const total = T.caseCount(o.nIn);
+  const total = T.caseCount(o.nIn, o.nState);
   try {
     const receipt = await send({
       address: L, abi: state.abi, functionName: "check", args: [v.id, BigInt(n)], gas: G.checkGasLimit(i, n, d.gateCount),
@@ -1828,7 +1870,7 @@ async function doCheck(o, d, maxN) {
     await loadOrder(v.id, {
       failedCase, quiet: true,
       after: (data) => {
-        if (rej) return { key: "tool.check.rejected", vars: { c: failedCase, inputs: inputsLabel(failedCase, o.nIn) }, err: true };
+        if (rej) return { key: "tool.check.rejected", vars: { c: failedCase, inputs: inputsLabel(failedCase, o.nIn, o.nState) }, err: true };
         if (data.order?.status === 2) return { key: "tool.check.passed" };
         return { key: "tool.check.more", vars: { n: data.delivery?.nextCase ?? 0, total } };
       },
@@ -1837,7 +1879,7 @@ async function doCheck(o, d, maxN) {
     v.busy = false;
     if (afterSendFailure(e, v, "checkTx", "check", key)) return;
     v.msgs.checkTx = null;
-    v.msgs.check = { err: true, text: explain(e, { nIn: o.nIn, action: "check" }).text };
+    v.msgs.check = { err: true, text: explain(e, { nIn: o.nIn, nState: o.nState, action: "check" }).text };
     renderOrder();
   }
 }
