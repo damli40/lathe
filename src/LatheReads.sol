@@ -43,7 +43,7 @@ library LatheReads {
         for (uint256 k = 0; k < ps.length; ++k) {
             _requireSame(pds[k], ps[k].nIn, ps[k].nOut, 0);
         }
-        uint256 budget = _paidBudget(o, d);
+        uint256 budget = _paidBudget(o, d, ps.length);
         return _low(IProcessor(d.processor).eval{gas: budget}(d.circuitId, inputs), o.nOut);
     }
 
@@ -66,6 +66,31 @@ library LatheReads {
             if (procs[k] == address(0)) revert LatheOrders.PiecesNotPassed();
         }
         return NetlistLib.encodeRefTop(procs, ids, ps, ws, nIn, nOut);
+    }
+
+    /// @notice The circuit a "Lathe joins" pieced order's receipt names, or (0, 0) when it has none. An order has a
+    /// single circuit only when that circuit computes the order's rule exactly as it is: 1 piece, and either no
+    /// stored wires (created without wires) or the identity wiring (order input i feeds pin i for every pin, piece
+    /// output j is order output j for every output, nothing else). Any other 1-piece wiring (inputs swapped, one
+    /// input fanned out to two pins, an output left unused) computes a different rule, or has a different shape,
+    /// from the piece's circuit, so the receipt names none and ruleOf reverts NoSingleCircuit, as for 2+ pieces.
+    /// `ws` is sorted (LatheChecks._sortWires): slot j < nIn is pin j of piece 0, slot nIn + j is order output j.
+    function singleCircuit(Piece[] storage ps, mapping(uint256 => LatheOrders.Delivery) storage pds, Wire[] storage ws)
+        external
+        view
+        returns (address, uint256)
+    {
+        if (ps.length != 1) return (address(0), 0);
+        Piece memory p = ps[0];
+        if (ws.length != 0) {
+            if (ws.length != uint256(p.nIn) + p.nOut) return (address(0), 0);
+            for (uint256 j = 0; j < ws.length; ++j) {
+                Wire memory e = ws[j];
+                bool pin = j < p.nIn;
+                if (e.fromPiece != (pin ? WIRE_TOP : 0) || e.fromBit != (pin ? j : j - p.nIn)) return (address(0), 0);
+            }
+        }
+        return (pds[0].processor, pds[0].circuitId);
     }
 
     /// @notice LatheOrders.wiresOf: the stored wires, or for a pieced order created without wires the V3a join
@@ -101,7 +126,7 @@ library LatheReads {
     ) external view returns (bytes memory newState, bytes memory outputs) {
         if (o.status != LatheOrders.Status.Paid) revert LatheOrders.NotPaid();
         if (o.nState == 0 || !_fits(inputs, o.nIn) || !_fits(state, o.nState)) revert LatheOrders.BadInputs();
-        uint256 budget = _paidBudget(o, d);
+        uint256 budget = _paidBudget(o, d, 0);
         (newState, outputs) = IProcessor(d.processor).step{gas: budget}(d.circuitId, state, inputs);
         return (_low(newState, o.nState), _low(outputs, o.nOut));
     }
@@ -162,14 +187,16 @@ library LatheReads {
         return BitLib.lowBits(out, p.nOut);
     }
 
-    /// @dev The circuit must be the one delivered, and the caller must leave room for its full budget.
-    function _paidBudget(LatheOrders.Order storage o, LatheOrders.Delivery storage d)
+    /// @dev The circuit must be the one delivered, and the caller must leave room for its full budget:
+    /// evalBudget(gateCount), plus EVAL_GAS_PER_REF for each of the `refs` REF records of a top circuit (one per
+    /// piece; 0 for a V0-V2 circuit). See LatheOrders.EVAL_GAS_PER_REF.
+    function _paidBudget(LatheOrders.Order storage o, LatheOrders.Delivery storage d, uint256 refs)
         private
         view
         returns (uint256 budget)
     {
         _requireSame(d, o.nIn, o.nOut, o.nState);
-        budget = _evalBudget(d.gateCount);
+        budget = _evalBudget(d.gateCount) + LATHE_EVAL_GAS_PER_REF * refs;
         _requireCaseGas(budget);
     }
 

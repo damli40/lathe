@@ -112,8 +112,9 @@ What it does and what you should see:
 | (k) | Creates a "daily cap" order on 2-bit numbers with explicit wires, paid as "Lathe joins": inputs x0 x1 = spent, x2 x3 = amount, x4 x5 = cap. Piece 0 adds spent and amount (formula circuit 1), piece 1 asks "is the cap at least that sum" (formula circuit 5, cap 2 bits, sum 3 bits). Both are checked inside `deliverPiece` | `order id 9 status 2` (Paid when piece 1 passes); `run` on all 64 inputs equals "cap >= spent + amount" (x = `0x25` gives 1, `0x27` gives 0) |
 | (l) | The same order, created as "needs a top circuit". Both pieces pass but it stays Open. The script reads `expectedTopNetlist(10)`, mints a circuit with those bytes (6 inputs, 1 output) on `REF_PROCESSOR`, and calls `deliverTop` | `order id 10 status 2`; `ruleOf(10)` names the top circuit on `REF_PROCESSOR`; `run(10, x)` (one run of the top circuit) equals `run(9, x)` on all 64 inputs |
 | (m) | A third "needs a top circuit" order with both pieces passed. Two bad tops are minted: the right bytes with the wrong shape (7 inputs), and wrong bytes (the comparator's five input wires rotated by one) | `deliverTop reverts ShapeMismatch` and `deliverTop reverts WrongTopCircuit` (both simulated, not sent); `order id 11 status 0` |
+| (n) | A "needs a top circuit" order of 6 one-gate XOR pieces in a chain (7 inputs, answer = their parity). Sets up circuit 9 on the mock `PROCESSOR` as a 1-gate XOR, delivers it as all 6 pieces, mints the top on `REF_PROCESSOR` and calls `deliverTop` | `order id 12 status 2`; `ruleOf(12)` names the top; `run(12, x)` with 3,000,000 gas equals the parity on all 128 inputs. The REF processor charges about what a real REF costs, so this step fails if a top's run budget ever drops back to `evalBudget(gates)` alone |
 
-Every transaction (orders 1 to 11, their deliveries and the three top circuits minted in (l) and (m)) is sent before the simulated wrong deliveries in (b), (e), (h) and (m). A pranked call from your account uses up one of its nonces in forge's simulation, so a transaction queued after it went out with a nonce the chain skipped (seen on the local anvil run: "provider nonce is still behind expected nonce").
+Every transaction (orders 1 to 12, their deliveries, the mock circuit set up in (n) and the four top circuits minted in (l), (m) and (n)) is sent before the simulated wrong deliveries in (b), (e), (h) and (m). A pranked call from your account uses up one of its nonces in forge's simulation, so a transaction queued after it went out with a nonce the chain skipped (seen on the local anvil run: "provider nonce is still behind expected nonce").
 
 The (f) reads and the `run` / `runStep` calls are free reads that forge runs in its simulation of the same transactions; they are never sent. `run` and `runStep` get an explicit 1,000,000 gas: like `check`, they refuse (`InsufficientGasForCase`) unless they can give the circuit its whole per-case budget. To confirm on chain afterwards:
 
@@ -146,7 +147,9 @@ node scripts/crank.mjs --lathe <LATHE> --order 8 --piece 0 --batch 1000 \
 
 `--password-file` is a file only you can read (`chmod 600`) holding the keystore password; delete it after the run. Without it cast asks for the password on every transaction (about 5 here). Add `--dry` first to see the plan and the worst-case cost without sending anything. On the local anvil run the crank lowered the batch to 940 cases (gas limit 199,970,820 under the 200M default), sent 5 transactions, and the last one paid order 8. Expect `order 8 paid`.
 
-All thirteen steps must behave as described before mainnet.
+All fourteen steps, (a) to (n), must behave as described before mainnet.
+
+With step (n) and the top-run fix (2026-11-21, local anvil, chain id 1952, block gas limit 210M, anvil's unlocked default account): `ONCHAIN EXECUTION COMPLETE & SUCCESSFUL`, (a) to (n) as described. With the top's per-piece run gas set back to 0 (the old budget) as a check, the run stopped at `(n)`. Not yet run on testnet.
 
 With the wired steps (k) to (m) (2026-11-21, local anvil, chain id 1952, block gas limit 210M, anvil's unlocked default account): `ONCHAIN EXECUTION COMPLETE & SUCCESSFUL`; read back from the chain afterwards, orders 9 and 10 were Paid and order 11 Open, and `ruleOf(10)` named circuit 1 on `REF_PROCESSOR`. The deploy broadcast held the three library deploys (CREATE2) before the mocks and `LatheOrders`. Not yet run on testnet.
 
@@ -195,7 +198,7 @@ forge script script/Deploy.s.sol \
 
 `--verify` also verifies the three libraries, because they are deployed by the same run (not tested; if one is missing on OKLink, use the four `forge verify-contract` commands in step 3 with the `XLAYER` URL). The library addresses are in `broadcast/Deploy.s.sol/196/run-latest.json` under `libraries`; record them with the `LatheOrders` address.
 
-The script refuses to run unless the chain is 196, the factory and USDT have code, USDT has 6 decimals, `FEE_RECIPIENT` is not zero and `FEE_BPS` is at most 500. It prints one line: `LatheOrders 0x...`. Record that address, the two library addresses and the three transaction hashes (from `broadcast/Deploy.s.sol/196/run-latest.json`) in `evidence/2026-11-2x-deploy-v0.md`.
+The script refuses to run unless the chain is 196, the factory and USDT have code, USDT has 6 decimals, `FEE_RECIPIENT` is not zero and `FEE_BPS` is at most 500. It prints one line: `LatheOrders 0x...`. Record that address, the three library addresses and the four transaction hashes (three libraries, then `LatheOrders`) (from `broadcast/Deploy.s.sol/196/run-latest.json`) in `evidence/2026-11-2x-deploy-v0.md`.
 
 ## Gotcha: give `deliver` explicit gas when using forge scripts
 

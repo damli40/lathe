@@ -19,7 +19,7 @@ Without `--password-file`, cast asks for the keystore password on every transact
 
 ## How the gas limit is set, and why not by simulation
 
-Each case's circuit gets exactly `evalBudget(gateCount) = 100,000 + 15,000 × gateCount` gas. The contract will not start a case unless that much is left (`InsufficientGasForCase`), so nobody can make an honest circuit fail by sending too little gas. A circuit may use its whole budget. So the script sets every gas limit from that budget, never from a simulation:
+Each case's circuit gets exactly `evalBudget(gateCount) = 100,000 + 15,000 × gateCount` gas. A piece made mostly of links (REF records) to 1- or 2-gate circuits can need more than that per case on real TapeOut (measured: more than 4 links to a 1-gate circuit, more than 13 to a 2-gate one, [evidence](../evidence/2026-11-21-ref-heavy-circuit-budget.md)); the crank then stops at its first case with `Rejected` (exit 2), as for any wrong circuit, and the builder can deliver the same logic built differently. The contract will not start a case unless that much is left (`InsufficientGasForCase`), so nobody can make an honest circuit fail by sending too little gas. A circuit may use its whole budget. So the script sets every gas limit from that budget, never from a simulation:
 
 - per case: ⌈budget × 64/63⌉ + 20,000 + 30,000 slack
 - per transaction: + 150,000 + the netlist read (30,000 + 70 gas per netlist byte)

@@ -16,6 +16,7 @@ import {
     LATHE_MAX_ANSWER_BITS,
     LATHE_EVAL_BASE_GAS,
     LATHE_EVAL_GAS_PER_GATE,
+    LATHE_EVAL_GAS_PER_REF,
     LATHE_GAS_RESERVE,
     LATHE_MAX_PIECES,
     LATHE_MAX_FORMULA_BITS
@@ -61,9 +62,11 @@ contract LatheOrders is ReentrancyGuard {
     /// the Receipt event sharing one name; the event name is the one in the ABI.)
     /// - V0-V2 order: the delivered circuit, and tableHash = keccak256(abi.encodePacked(nIn, nOut, nState,
     ///   tableOf[orderId])) (see _pay).
-    /// - Pieced order: tableHash = piecedHash(orderId) = keccak256(abi.encode(pieces, tables)). A 1-piece order
-    ///   names its piece's circuit. A 2-piece order has no single circuit, so processor and circuitId are 0; its
-    ///   circuits are in pieceOf(orderId, i).
+    /// - Pieced order: tableHash = piecedHash(orderId) = keccak256(abi.encode(pieces, tables)) (with the wires too
+    ///   for an order created with wires). It names one circuit only when that circuit computes the order's rule
+    ///   exactly as it is: the delivered top of an order that needs one, or the piece of a 1-piece order created
+    ///   without wires or with the identity wiring (LatheReads.singleCircuit). Any other pieced order has no single
+    ///   circuit, so processor and circuitId are 0; its circuits are in pieceOf(orderId, i).
     struct PaidReceipt {
         address processor;
         uint256 circuitId;
@@ -102,6 +105,11 @@ contract LatheOrders is ReentrancyGuard {
     /// for circuits built from REFs to the 4-gate XOR. The per-gate figure covers the REF-heavy case with 1.5x.
     uint256 public constant EVAL_BASE_GAS = LATHE_EVAL_BASE_GAS;
     uint256 public constant EVAL_GAS_PER_GATE = LATHE_EVAL_GAS_PER_GATE;
+    /// @notice What run gives a paid order's top circuit: evalBudget(top's gate count) + EVAL_GAS_PER_REF x pieces
+    /// (one REF record per piece). On real TapeOut a REF record costs about 33,000 gas or more on its own, far above
+    /// what 15,000 per gate gives a REF to a 1- or 2-gate piece. Since EVAL_GAS_PER_REF >= EVAL_BASE_GAS, the top
+    /// also gets at least what every piece was allowed in its own case check. Only run uses it; case checks do not.
+    uint256 public constant EVAL_GAS_PER_REF = LATHE_EVAL_GAS_PER_REF;
     /// @notice Gas kept back for the work between the gas check and the call, so eval really gets its budget.
     uint256 public constant GAS_RESERVE = LATHE_GAS_RESERVE;
     /// @notice Largest budget for one case. A circuit above it could never be checked in one X Layer
@@ -353,6 +361,7 @@ contract LatheOrders is ReentrancyGuard {
     function deliver(uint256 orderId, address processor, uint256 circuitId) external nonReentrant {
         Order storage o = _openOrder(orderId, false);
         uint32 gates = _acceptCircuit(o, processor, circuitId, o.nIn, o.nOut, o.nState, o.maxGates);
+        _requireCheckable(gates);
         _record(deliveries[orderId], processor, circuitId, gates);
         o.status = Status.Checking;
         emit Delivered(orderId, msg.sender, processor, circuitId);
@@ -371,8 +380,9 @@ contract LatheOrders is ReentrancyGuard {
         if (block.timestamp > o.deadline) revert DeadlinePassed();
     }
 
-    /// @dev The delivery guards shared by deliver and deliverPiece: a TapeOut processor, the named builder, who owns
-    /// the circuit, the right shape, under the gate cap, and small enough that one case fits in a transaction.
+    /// @dev The delivery guards shared by deliver, deliverPiece and deliverTop: a TapeOut processor, the named builder,
+    /// who owns the circuit, the right shape, under the gate cap. (Small enough that one case fits in a transaction
+    /// is _requireCheckable, for the two deliveries that are checked case by case.)
     function _acceptCircuit(
         Order storage o,
         address processor,
@@ -396,6 +406,12 @@ contract LatheOrders is ReentrancyGuard {
         (nIn, nOut, nState, gates) = IProcessor(processor).circuitInfo(circuitId);
         if (nIn != wantIn || nOut != wantOut || nState != wantState) revert ShapeMismatch();
         if (maxGates != 0 && gates > maxGates) revert TooManyGates();
+    }
+
+    /// @dev deliver and deliverPiece only: one case must fit in a transaction, or the check could never finish.
+    /// Not applied to a top circuit (deliverTop), which is never checked case by case: its gate count is the sum of
+    /// its pieces' gates, so this guard would refuse an honest top made of big pieces that each passed.
+    function _requireCheckable(uint256 gates) internal pure {
         if (evalBudget(gates) > MAX_CASE_GAS) revert CircuitTooBigToCheck();
     }
 
@@ -566,13 +582,19 @@ contract LatheOrders is ReentrancyGuard {
     ///   nIn or nOut, so the same bytes minted with another shape would wire different signals);
     /// - WrongTopCircuit unless keccak256(netlist) equals keccak256(expectedTopNetlist(orderId)).
     /// Then it pays once, with one receipt naming the top circuit; deliveries(orderId) holds the top from then on.
+    /// No size guard: the top is never checked case by case, so CircuitTooBigToCheck (which deliver and deliverPiece
+    /// apply) does not apply here, and nothing on this path depends on one case of the top fitting a transaction.
+    /// A top whose run budget is too big for a free call only makes run refuse; ruleOf still names it.
     /// Why the top is not checked case by case: equal bytes mean the top is exactly one REF to each delivered piece
     /// circuit, in order, fed from the wires the order names, and TapeOut runs a REF by running that circuit. Every
     /// piece passed every one of its cases and is re-verified unchanged here, so the top computes the joined rule
     /// on every input by construction. The REF targets cannot be other circuits: the bytes name exactly the piece
     /// processors and ids that passed deliverPiece's checks (a registered TapeOut processor, the builder's own
     /// circuit), and TapeOut refused to mint a REF to an unregistered processor or a missing circuit anyway.
-    /// Gas: run on the top uses the top's own gate count, which includes every referenced gate.
+    /// Gas: run on the top gives it evalBudget(its gate count, which includes every referenced gate) plus
+    /// EVAL_GAS_PER_REF per piece. A piece made of REFs to further circuits costs more per REF than that counts;
+    /// the contract cannot count those nested REFs, so for such a top run may refuse (never a wrong answer) and the
+    /// rule is still usable through ruleOf and a direct eval on the processor.
     function deliverTop(uint256 orderId, address processor, uint256 circuitId) external nonReentrant {
         Order storage o = orders[orderId];
         if (!needsTop[orderId]) revert WrongOrderKind();
@@ -592,6 +614,9 @@ contract LatheOrders is ReentrancyGuard {
     /// budget). A piece with no delivery can be delivered until the deadline; a piece being checked cannot
     /// (NotOpen) and a passed piece never can (PieceAlreadyPassed). When 2^nIn x evalBudget(gates) <= 30M the piece
     /// is checked here and a wrong answer reverts; otherwise anyone pushes the check with checkPiece.
+    /// For an order that needs a top circuit, a circuit id above 2^64 - 1 can pass here but can never be named by
+    /// a REF record, so deliverTop would always revert BadPiece and the buyer refunds after deadline + GRACE. Real
+    /// TapeOut ids are sequential from 1, so this is not checked here (it would cost contract size).
     function deliverPiece(uint256 orderId, uint256 pieceIndex, address processor, uint256 circuitId)
         external
         nonReentrant
@@ -599,6 +624,7 @@ contract LatheOrders is ReentrancyGuard {
         Order storage o = _openOrder(orderId, true);
         Piece memory p = _undeliveredPiece(orderId, pieceIndex);
         uint32 gates = _acceptCircuit(o, processor, circuitId, p.nIn, p.nOut, 0, pieceMaxGatesOf[orderId][pieceIndex]);
+        _requireCheckable(gates);
         Delivery storage d = pieceOf[orderId][pieceIndex];
         _record(d, processor, circuitId, gates);
         emit PieceDelivered(orderId, pieceIndex, processor, circuitId);
@@ -693,23 +719,16 @@ contract LatheOrders is ReentrancyGuard {
     /// @dev Mark the piece passed; when every piece has passed, check every piece's circuit again (gate count and
     /// netlist hash, so a piece that passed earlier and then changed is never paid for) and pay. A change reverts
     /// CircuitChanged: the order cannot pay and the buyer refunds after deadline + GRACE.
-    /// Receipt: a 1-piece order names its circuit; a 2-piece order has no single circuit, so processor and id are 0.
+    /// Receipt: names the piece's circuit only for a 1-piece order without wires or with the identity wiring
+    /// (LatheReads.singleCircuit); otherwise processor and id are 0.
     function _piecePassed(uint256 orderId, uint256 pieceIndex, Order storage o, Delivery storage d, uint256 total)
         internal
     {
         d.nextCase = uint32(total);
         emit PiecePassed(orderId, pieceIndex);
         if (needsTop[orderId] || !_allPassedUnchanged(orderId)) return; // a needs-top order pays at deliverTop
-        Delivery storage first = pieceOf[orderId][0];
-        bool single = _pieces[orderId].length == 1;
-        _payOut(
-            orderId,
-            o,
-            o.builder,
-            single ? first.processor : address(0),
-            single ? first.circuitId : 0,
-            piecedHash(orderId)
-        );
+        (address p, uint256 id) = LatheReads.singleCircuit(_pieces[orderId], pieceOf[orderId], _wires[orderId]);
+        _payOut(orderId, o, o.builder, p, id, piecedHash(orderId));
     }
 
     /// @dev False while any piece has not passed. Once all have, reverts CircuitChanged if any piece's circuit
@@ -799,15 +818,17 @@ contract LatheOrders is ReentrancyGuard {
         usdt.safeTransfer(payee, o.amount - fee);
     }
 
-    /// @notice The rule a paid order bought: the circuit that passed every case. Reverts NotPaid otherwise.
-    /// A pieced order of 2 or more pieces paid as "Lathe joins" has no single circuit (run joins its pieces), so it
-    /// reverts NoSingleCircuit; read piecesOf and pieceOf instead. A 1-piece order returns its piece's circuit, and
-    /// an order paid with a top circuit returns the top.
+    /// @notice The rule a paid order bought, as one circuit that computes it exactly as is, on the order's own
+    /// inputs and outputs. Reverts NotPaid otherwise. A V0-V2 order returns its delivered circuit and an order paid
+    /// with a top circuit returns the top. A "Lathe joins" pieced order returns its piece's circuit only when it has
+    /// 1 piece and no wires or the identity wiring; every other one (2+ pieces, or 1 piece whose wires swap, fan
+    /// out or drop bits) has no single circuit (run joins its pieces along the wires) and reverts NoSingleCircuit;
+    /// read piecesOf, pieceOf and wiresOf instead.
     /// (Kept here, not in LatheReads: as a library call it made this contract 50 bytes larger, measured.)
     function ruleOf(uint256 orderId) external view returns (address processor, uint256 circuitId) {
         if (orders[orderId].status != Status.Paid) revert NotPaid();
         PaidReceipt storage r = receipts[orderId];
-        if (r.processor == address(0)) revert NoSingleCircuit(); // only a joined order of 2+ pieces is paid with none
+        if (r.processor == address(0)) revert NoSingleCircuit(); // only a joined pieced order can be paid with none
         return (r.processor, r.circuitId);
     }
 

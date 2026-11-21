@@ -147,3 +147,22 @@ test("pieced run gas: every piece's netlist and hold, x 64/63 (same figure as te
   assert.equal(runPiecedGasLimit(c, [200, 200]), up(RUN_OVERHEAD + 2n * (600n * 200n + hold2(c, 200))));
   assert.ok(runPiecedGasLimit(c, [70, 652]) > runGasLimit(c, 652));
 });
+
+import { runTopGasLimit, topHold } from "../gas.js";
+
+test("run gas for a top: pieces' netlists + the top's REF records + ONE hold for the top's budget (same figure as test/LatheOrders.review.t.sol)", () => {
+  const c = { base: 100_000n, perGate: 15_000n, reserve: 20_000n, perRef: 150_000n };
+  const up = (g) => (g * 64n + 62n) / 63n;
+  const eight = Array.from({ length: 8 }, () => ({ gates: 1, nIn: 2 }));
+  // 8 one-gate pieces, top gates 8: budget 100,000 + 15,000 x 8 + 150,000 x 8 = 1,420,000
+  assert.equal(topHold(c, 8, 8), (1_420_000n * 64n + 62n) / 63n + 20_000n);
+  assert.equal(runTopGasLimit(c, eight, 8), up(RUN_OVERHEAD + 8n * 600n + 600n * ((8n * 37n + 6n) / 7n) + topHold(c, 8, 8)));
+  assert.equal(runTopGasLimit(c, eight, 8), 1_821_603n); // pageTopRunGas in test/LatheOrders.review.t.sol
+  // The top's gate count already holds the pieces' gates: no per-piece hold on top of it (the old page figure
+  // added one for every piece and one for the top).
+  const two = [{ gates: 200, nIn: 4 }, { gates: 200, nIn: 4 }];
+  assert.ok(runTopGasLimit(c, two, 400) < runPiecedGasLimit(c, [200, 200, 400]));
+  // A contract from before EVAL_GAS_PER_REF gave the top evalBudget(gates) alone.
+  const old = { base: 100_000n, perGate: 15_000n, reserve: 20_000n };
+  assert.equal(topHold(old, 8, 8), (220_000n * 64n + 62n) / 63n + 20_000n);
+});

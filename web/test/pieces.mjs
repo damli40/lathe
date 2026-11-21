@@ -12,7 +12,12 @@
 //   (8) a 2-bit daily-cap order that needs a top circuit, both pieces passed, top minted on the REF processor and
 //       delivered with deliverTop (paid; the receipt names the top);
 //   (9) the same, both pieces passed, no top yet (open, waiting for the top);
-//  (10) the same, only piece 1 delivered (open, waiting for the pieces).
+//  (10) the same, only piece 1 delivered (open, waiting for the pieces);
+//  (11) a paid 1-piece "Lathe joins" order whose wires swap the piece's two inputs: the piece circuit computes another
+//       rule, so the receipt names no circuit and the page says so (and does not ask ruleOf);
+//  (12) a paid needs-a-top order of 6 one-gate XOR pieces (parity of 7 inputs): run via the top answers with the
+//       page's gas figure. The mock REF processor charges about what a real REF costs, so with the old top budget
+//       (evalBudget of the top's gates alone) or a page figure below the contract's budget this run would be refused.
 // Then anvil time moves 200 s, past the short deadlines of (2) and (4).
 // Asserts the true statements (made of N pieces, each piece's rule, state and cap, the refund rule matching
 // LatheOrders.refund, the pieced receipt fingerprint, each piece's circuit, no single circuit, run answers on inputs
@@ -129,6 +134,27 @@ try {
   deliverPiece(O9, 1, 5);
   const O10 = createWired([ADD, GE23], ["0x", "0x"], topWires, true);
   deliverPiece(O10, 0, 1);
+
+  // (11) piece "a AND NOT b" (mock circuit 78), order bit 1 -> pin 0 and bit 0 -> pin 1.
+  const P = addrs.processor;
+  send(P, "setCircuit(uint256,address,uint32,uint32,uint32,uint32)", "78", ANVIL_ACCOUNT0, "2", "1", "0", "3");
+  send(P, "setOuts(uint256,bytes[])", "78", "[0x00,0x01,0x00,0x00]");
+  const AND_NOT = "(0,2,1,0,0)";
+  const O11 = createWired([AND_NOT], ["0x02"], [[T, 1, 0, 0], [T, 0, 0, 1], [0, 0, T, 0]], false);
+  send(L, "deliverPiece(uint256,uint256,address,uint256)", O11, "0", P, "78", "--gas-limit", "30000000");
+  assert(status(O11) === "2", `order ${O11}: 1-piece wired order paid`);
+  // (12) six one-gate XOR pieces (mock circuit 79) in a chain, as a top.
+  send(P, "setCircuit(uint256,address,uint32,uint32,uint32,uint32)", "79", ANVIL_ACCOUNT0, "2", "1", "0", "1");
+  send(P, "setOuts(uint256,bytes[])", "79", "[0x00,0x01,0x01,0x00]");
+  const parityWires = [];
+  for (let k = 0; k < 6; k++) parityWires.push(k === 0 ? [T, 0, 0, 0] : [k - 1, 0, k, 0], [T, k + 1, k, 1]);
+  parityWires.push([5, 0, T, 0]);
+  const O12 = createWired(Array(6).fill(XOR), Array(6).fill("0x06"), parityWires, true);
+  for (let k = 0; k < 6; k++) send(L, "deliverPiece(uint256,uint256,address,uint256)", O12, String(k), P, "79", "--gas-limit", "30000000");
+  send(R, "mint(bytes,uint32,uint32,address)", cast("call", L, "expectedTopNetlist(uint256)(bytes)", O12), "7", "1", ANVIL_ACCOUNT0);
+  const TOP12 = cast("call", R, "lastId()(uint256)").split(" ")[0];
+  send(L, "deliverTop(uint256,address,uint256)", O12, R, TOP12, "--gas-limit", "30000000");
+  assert(status(O12) === "2", `order ${O12}: parity top paid`);
 
   await rpc(anvil.url, "evm_increaseTime", [200]);
   await rpc(anvil.url, "evm_mine", []);
@@ -308,6 +334,32 @@ try {
   assert((await page.locator("#top-state").getAttribute("data-state")) === "pieces" && /Waiting for every piece to pass/.test(await page.locator("#top-state").textContent()), "waiting for the pieces");
   assert((await page.locator("#pieces-progress").textContent()) === "1 of 2 pieces passed.", "1 of 2 passed");
   await noFalse("order (10)");
+
+  console.log(`(11) paid 1-piece order ${O11} with swapped wires`);
+  await openView("receipt", O11);
+  assert(/has no single circuit/.test(await page.locator("#receipt-nosingle").textContent()), "a 1-piece order with swapped wires has no single circuit");
+  assert((await page.locator("#receipt-rule").count()) === 0, "no ruleOf line (the contract's receipt names no circuit)");
+  assert((await page.locator("#receipt-hash").textContent()).startsWith("Matches"), "fingerprint matches");
+  await page.click('#try-box button.bit[data-k="0"]'); // x0 = 1, x1 = 0: x1 AND NOT x0 = 0 (the piece alone would say 1)
+  await page.click("#run-btn");
+  await page.waitForSelector("#run-result", { timeout: T_LONG });
+  assert((await page.locator("#run-result").textContent()) === "The rule answered y0=0." && /same answer/.test(await page.locator("#run-check").textContent()), "run follows the wires: y0=0");
+  await noFalse("receipt (11)");
+
+  console.log(`(12) paid top of 6 one-gate pieces ${O12}`);
+  await openView("receipt", O12);
+  assert(/ruleOf/.test(await page.locator("#receipt-rule").textContent()), "ruleOf names the top");
+  for (const bits of [[0], [0, 3, 6], [1, 2, 3, 4, 5, 6]]) {
+    await page.goto(`${server.url}?lang=en&receipt=${O12}`);
+    await page.waitForSelector("#run-btn", { timeout: T_LONG });
+    for (const k of bits) await page.click(`#try-box button.bit[data-k="${k}"]`);
+    await page.click("#run-btn");
+    await page.waitForSelector("#run-result", { timeout: T_LONG });
+    const r = await page.locator("#run-result").textContent();
+    const want = bits.length % 2;
+    assert(r === `The rule answered y0=${want}.` && /same answer/.test(await page.locator("#run-check").textContent()), `run via the 6-REF top on [${bits}] answers y0=${want}: ${r}`);
+  }
+  await noFalse("receipt (12)");
 
   console.log("ZH strings");
   await page.goto(`${server.url}?lang=zh&order=${O1}`);

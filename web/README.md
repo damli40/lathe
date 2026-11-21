@@ -67,7 +67,7 @@ Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mon
 - Receipt view, `?receipt=N`: needs no wallet. It shows what the contract wrote at payout (processor, circuit,
   table fingerprint, block), checks the fingerprint against the stored table and shape (the contract hashes
   `abi.encodePacked(nIn, nOut, nState, table)`) and `ruleOf` against the receipt, and lets a visitor run the paid circuit (`run`, or `runStep` with memory) as a free `eth_call`. The call asks for
-  `(RUN_OVERHEAD + netlist + one case's hold) x 64/63` gas (`gas.js`; the 64/63 is for the hop into the linked library `LatheReads`, which gets 63/64 of the gas). If that is above the 48M the page keeps under the
+  `(RUN_OVERHEAD + netlist + one case's hold) x 64/63` gas (for a pieced order: every piece's netlist and hold; for an order paid with a top circuit: every piece's netlist and one hold for the top's budget, `evalBudget(top gates) + EVAL_GAS_PER_REF × pieces`, read from the contract) (`gas.js`; the 64/63 is for the hop into the linked library `LatheReads`, which gets 63/64 of the gas). If that is above the 48M the page keeps under the
   public node's cap, the page says so and does not call. If a node gives the call less gas anyway, the contract
   reverts `InsufficientGasForCase` and the page shows that as an error. It never shows an answer it did not get
   in full. While a call is out the 0/1 switches are off; an answer that comes back after the view changed (reload,

@@ -175,6 +175,32 @@ export function runPiecedGasLimit(c, gateCounts) {
 }
 
 /**
+ * Gas to ask for when calling run on a paid order that has a top circuit. run checks every piece's circuit is
+ * unchanged (reads each piece's netlist) and the top's (one REF record per piece, 31 + 3 x the piece's inputs bytes),
+ * then makes one eval of the top with the top's budget: evalBudget(top gates) + perRef x pieces (the contract's
+ * EVAL_GAS_PER_REF; 0 on a contract from before it, which gave the top evalBudget alone). The top's gate count
+ * already includes every piece's gates, so the pieces get no hold of their own. `pieces` holds each piece's
+ * recorded gate count and input count: [{ gates, nIn }].
+ */
+export function runTopGasLimit(c, pieces, topGates) {
+  let g = RUN_OVERHEAD;
+  let topBytes = 0n;
+  for (const p of pieces) {
+    g += NETLIST_GAS_PER_GATE * BigInt(p.gates);
+    topBytes += 31n + 3n * BigInt(p.nIn);
+  }
+  g += NETLIST_GAS_PER_GATE * ((topBytes + 6n) / 7n); // a NAND record is 7 bytes: one gate's worth of netlist
+  g += topHold(c, pieces.length, topGates);
+  return hop(g);
+}
+
+/** Gas the top's one eval must have free: its budget * 64/63 + reserve (LatheReads._paidBudget). */
+export function topHold(c, nPieces, topGates) {
+  const b = evalBudget(c, topGates) + (c.perRef ?? 0n) * BigInt(nPieces);
+  return (b * 64n + 62n) / 63n + c.reserve;
+}
+
+/**
  * True when a run call fits under the public node's eth_call cap. When it does not, the page does not call:
  * the node would cut the gas and the contract would refuse (InsufficientGasForCase), so there is no answer to show.
  */

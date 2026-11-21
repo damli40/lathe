@@ -383,8 +383,9 @@ async function readMany(thunks) {
 
 // Constants and immutables of a deployed LatheOrders never change, so they are cached per chain and address
 // (a per-viewer convenience; the page reads them again whenever the cache is missing or unreadable).
-const INFO_BIG = ["base", "perGate", "reserve", "inlineMax", "maxCaseGas", "grace"];
-const infoCacheKey = (n) => `lathe.info.v2.${n.chainId}.${n.lathe.toLowerCase()}`;
+// perRef is EVAL_GAS_PER_REF (extra run gas per piece for a top circuit); 0 for a contract from before it.
+const INFO_BIG = ["base", "perGate", "reserve", "inlineMax", "maxCaseGas", "grace", "perRef"];
+const infoCacheKey = (n) => `lathe.info.v3.${n.chainId}.${n.lathe.toLowerCase()}`;
 const isInt = (x, lo, hi) => Number.isInteger(x) && x >= lo && x <= hi;
 
 // A cached entry is used only if every field has the right type and a sane range; anything else is re-read.
@@ -432,6 +433,14 @@ async function loadInfo() {
     base: r[0], perGate: r[1], reserve: r[2], inlineMax: r[3], maxCaseGas: r[4], grace: r[5],
     maxCaseBits: Number(r[6]), maxAnswerBits: Number(r[7]), factory: r[8], token: r[9], feeBps: Number(r[10]),
   };
+  // A contract from before the top-run fix has no EVAL_GAS_PER_REF and gave a top evalBudget alone: 0 then.
+  // A network failure is not taken as "old contract": it is thrown, like every other read here.
+  try {
+    i.perRef = await read(L, A, "EVAL_GAS_PER_REF");
+  } catch (e) {
+    if (explain(e, { read: true }).name === "network") throw e;
+    i.perRef = 0n;
+  }
   const [dec, sym] = await readMany([() => read(i.token, state.tokenAbi, "decimals"), () => read(i.token, state.tokenAbi, "symbol")]);
   i.decimals = Number(dec);
   i.symbol = sym;
@@ -1531,9 +1540,10 @@ async function loadOrder(id, keep = {}) {
         data.receipt = { processor: r[0], circuitId: r[1], tableHash: r[2], blockNumber: r[3] };
         if (pieced) data.piecedHash = await read(L, A, "piecedHash", [id]);
       }
-      // An order of 2 or more pieces without a top circuit has no single circuit, so ruleOf is not asked (it would
-      // revert NoSingleCircuit by design). A "needs a top" order's rule is its top circuit.
-      if (state.view.mode === "receipt" && data.order.status === 2 && (data.pieces.length <= 1 || data.needsTop)) {
+      // Whether the order has a single circuit is read from the chain: the receipt names one (a V0-V2 circuit, a
+      // top, or the piece of a 1-piece order without wires or with the identity wiring) or names none (processor 0),
+      // and then ruleOf would revert NoSingleCircuit by design, so it is not asked.
+      if (state.view.mode === "receipt" && data.order.status === 2 && hasSingle(data)) {
         try {
           const rule = await read(L, A, "ruleOf", [id]);
           data.rule = { processor: rule[0], circuitId: rule[1] };
@@ -1815,6 +1825,7 @@ function deliverBox(o, now) {
     for (const pmsg of problems) box.append(el("p", { class: "msg is-err", text: pmsg }));
     box.append(el("div", { class: "gasinfo" },
       el("p", {}, txt("tool.deliver.budget", { budget: "" }), el("span", { class: "mono", text: fmtInt(pv.budget) })),
+      el("p", { class: "help", id: "budget-refs", text: txt("tool.deliver.budgetRefs") }),
       el("p", { text: pv.inline ? txt("tool.deliver.inlineYes", { cases: T.caseCount(o.nIn, o.nState) }) : txt("tool.deliver.inlineNo") }),
       el("p", {}, txt("tool.deliver.gasLimit", { gas: "" }), el("span", { class: "mono", text: fmtInt(pv.gas) })),
       el("p", { text: txt("tool.deliver.gasWhy") }),
@@ -2254,6 +2265,11 @@ function piecedFingerprints(pieces, wires) {
   return out.map((h) => h.toLowerCase());
 }
 
+/** The receipt names one circuit (processor not zero): the contract's own answer to "is there a single circuit". */
+function hasSingle(data) {
+  return !!data.receipt && !/^0x0{40}$/i.test(String(data.receipt.processor));
+}
+
 function renderPiecedReceipt(box, v, data) {
   const o = data.order;
   const i = info();
@@ -2271,7 +2287,7 @@ function renderPiecedReceipt(box, v, data) {
   const r = data.receipt;
   head.append(el("p", { class: "help", text: txt("tool.pieces.receiptHelp") }));
   const hashOk = piecedFingerprints(pieces, data.wires).some((fp) => fp === String(r.tableHash).toLowerCase() && fp === String(data.piecedHash).toLowerCase());
-  const single = pieces.length === 1 || data.needsTop;
+  const single = hasSingle(data);
   const rows = [];
   if (single) {
     const rule = data.rule || {};
@@ -2298,16 +2314,19 @@ function renderPiecedReceipt(box, v, data) {
   box.append(el("div", { class: "ov" }, head, main, side));
 }
 
-// The joined rule as a free eth_call: run with gas for every piece's netlist read and hold (G.runPiecedGasLimit).
+// The joined rule as a free eth_call: run with the gas runGas works out for this order.
 // Same protections as tryBox / doRun: switches off while a call is out, an answer for another view, network or
 // switch setting is dropped, an answer is only shown when every byte came back, and a call too big for a public
 // node's free-call cap is not made at all.
-// The gate counts a run of this order holds gas for: every piece (run re-reads each piece's netlist), plus the top
-// circuit for a "needs a top" order (one eval of the top, whose gate count includes the pieces' gates).
-function runGates(pieces, data) {
-  const g = pieces.map((p) => p.delivery.gateCount);
-  if (data?.needsTop && data.delivery) g.push(data.delivery.gateCount);
-  return g;
+// Gas for one run of this order: joined pieces get a netlist read and a full hold each (G.runPiecedGasLimit); an
+// order paid with a top circuit gets the pieces' netlist reads and ONE hold for the top, whose budget already covers
+// every piece's gates plus EVAL_GAS_PER_REF per piece (G.runTopGasLimit), the same budget the contract gives it.
+function runGas(i, pieces, data) {
+  const d = data?.delivery;
+  if (data?.needsTop && d && !/^0x0{40}$/i.test(String(d.processor))) {
+    return G.runTopGasLimit(i, pieces.map((p) => ({ gates: p.delivery.gateCount, nIn: p.nIn })), d.gateCount);
+  }
+  return G.runPiecedGasLimit(i, pieces.map((p) => p.delivery.gateCount));
 }
 
 function piecedTryBox(o, pieces, labels, i, data) {
@@ -2330,7 +2349,7 @@ function piecedTryBox(o, pieces, labels, i, data) {
   }
   box.append(el("table", { class: "try-table" },
     el("thead", {}, el("tr", {}, el("th", { scope: "col", text: txt("tool.receipt.colInput") }), el("th", { scope: "col", text: txt("tool.receipt.colValue") }))), body));
-  const gas = G.runPiecedGasLimit(i, runGates(pieces, data));
+  const gas = runGas(i, pieces, data);
   const fits = gas <= G.SIM_GAS_CAP;
   const btn = el("button", { type: "button", class: "btn btn-primary", id: "run-btn", text: txt(v.busy === "run" ? "tool.receipt.running" : "tool.receipt.runBtn"), disabled: !fits || !!v.busy });
   btn.addEventListener("click", () => doRunPieced(o, pieces, data));
@@ -2347,7 +2366,7 @@ function piecedTryBox(o, pieces, labels, i, data) {
 async function doRunPieced(o, pieces, data) {
   const v = state.view;
   const i = info();
-  const gas = G.runPiecedGasLimit(i, runGates(pieces, data));
+  const gas = runGas(i, pieces, data);
   if (gas > G.SIM_GAS_CAP) return;
   const bits = v.tryBits.slice();
   let x = 0n;

@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Piece, PieceKind} from "../src/FormulaLib.sol";
 import {Wire, WIRE_TOP} from "../src/NetlistLib.sol";
 import {RefProcessor} from "../test/mocks/RefProcessor.sol";
+import {MockProcessor} from "../test/mocks/MockProcessor.sol";
 
 /// @notice Testnet smoke run (chain 1952) against the contracts DeployTestnet made.
 /// Env: LATHE, USDT, PROCESSOR, XOR_ID, WRONG_ID, FORMULA_PROCESSOR, REF_PROCESSOR; optional TOGGLE_ID (default 3),
@@ -47,6 +48,11 @@ import {RefProcessor} from "../test/mocks/RefProcessor.sol";
 ///   (m) a third needs-top order, both pieces passed; two bad tops are minted: the right bytes with the wrong shape
 ///       (7 inputs) and wrong bytes (the comparator's five input wires rotated by one). Both deliverTop
 ///       calls are simulated like (b) and must revert ShapeMismatch and WrongTopCircuit; the order stays Open.
+///   (n) a "needs a top circuit" order of 6 one-gate XOR pieces in a chain (parity of 7 inputs). The script sets up
+///       circuit 9 on the mock PROCESSOR as a 1-gate XOR, delivers it as every piece, mints the top on the
+///       REF_PROCESSOR and delivers it. run on all 128 inputs must equal the parity. The REF processor charges about
+///       what a real REF record costs, so this run fails if the top's run budget ever drops back to
+///       evalBudget(gates) alone (6 one-gate pieces get 190,000 then, far below 6 REFs).
 contract Smoke is Script {
     bytes internal constant XOR_TABLE = hex"06"; // cases 0..3 -> 0,1,1,0, LSB first
     /// Toggle: case c = x0 + 2s; new memory = s XOR x0, output = new memory; answers 0,3,3,0 = 0x3c.
@@ -61,6 +67,12 @@ contract Smoke is Script {
     uint256 internal constant PIECE_GAS = 10_000_000;
     /// Two-piece run: two evals, each with its full hold free (web/gas.js runPiecedGasLimit is about 760,000).
     uint256 internal constant PIECED_RUN_GAS = 2_000_000;
+    /// (n): the top of 6 pieces gets 100,000 + 15,000 x 6 + 150,000 x 6 = 1,090,000 (web/gas.js runTopGasLimit is
+    /// about 1.5M).
+    uint256 internal constant TOP_RUN_GAS = 3_000_000;
+    uint256 internal constant PARITY_PIECE_ID = 9; // on the mock PROCESSOR, set up by (n)
+    uint256 internal parityId;
+    uint256 internal parityTop;
 
     /// Ids of the two memory orders, (d) and (e). Kept in the script's storage to keep run()'s stack small.
     uint256 internal memPaidId;
@@ -92,7 +104,7 @@ contract Smoke is Script {
 
         vm.startBroadcast();
         (, address me,) = vm.readCallers();
-        usdt.approve(address(lathe), 11 * uint256(AMOUNT));
+        usdt.approve(address(lathe), 12 * uint256(AMOUNT));
 
         // (a) honest XOR -> Paid
         uint256 a = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, deadline, me, 0);
@@ -172,6 +184,7 @@ contract Smoke is Script {
         _memoryAndReads(lathe, me, processor, xorId, a);
         _piecedChecks(lathe, me);
         _wiredChecks(lathe, me);
+        _parityChecks(lathe);
     }
 
     /// The daily-cap shape on 2-bit numbers. Wires listed in sorted form: piece 0's inputs, piece 1's, the output.
@@ -221,6 +234,56 @@ contract Smoke is Script {
         lathe.deliverTop(toppedId, address(rp), goodTop);
         wrongShapeTop = rp.mint(nl, 7, 1, me);
         wrongBytesTop = rp.mint(_swappedTop(lathe, badTopId), 6, 1, me);
+        _sendParityTop(lathe, me, rp, deadline);
+    }
+
+    /// (n), sent inside run()'s broadcast.
+    function _sendParityTop(LatheOrders lathe, address me, RefProcessor rp, uint64 deadline) internal {
+        MockProcessor mp = MockProcessor(vm.envAddress("PROCESSOR"));
+        mp.setCircuit(PARITY_PIECE_ID, me, 2, 1, 0, 1);
+        bytes[] memory o = new bytes[](4);
+        o[0] = hex"00";
+        o[1] = hex"01";
+        o[2] = hex"01";
+        o[3] = hex"00";
+        mp.setOuts(PARITY_PIECE_ID, o);
+        LatheOrders.PiecedSpec memory s;
+        s.pieces = new Piece[](6);
+        s.tables = new bytes[](6);
+        s.maxGates = new uint32[](6);
+        s.labels = new bytes32[](0);
+        s.wires = new Wire[](13);
+        for (uint8 k = 0; k < 6; ++k) {
+            s.pieces[k] = Piece(PieceKind.Table, 2, 1, 0, 0);
+            s.tables[k] = XOR_TABLE;
+            s.wires[2 * k] = k == 0 ? Wire(WIRE_TOP, 0, 0, 0) : Wire(k - 1, 0, k, 0);
+            s.wires[2 * k + 1] = Wire(WIRE_TOP, k + 1, k, 1);
+        }
+        s.wires[12] = Wire(5, 0, WIRE_TOP, 0);
+        s.needsTop = true;
+        parityId = lathe.createPiecedOrder(s, AMOUNT, deadline, me);
+        for (uint256 k = 0; k < 6; ++k) {
+            lathe.deliverPiece{gas: PIECE_GAS}(parityId, k, address(mp), PARITY_PIECE_ID);
+        }
+        parityTop = rp.mint(lathe.expectedTopNetlist(parityId), 7, 1, me);
+        lathe.deliverTop(parityId, address(rp), parityTop);
+    }
+
+    /// Checks for (n).
+    function _parityChecks(LatheOrders lathe) internal view {
+        _logStatus("(n) top of 6 one-gate XOR pieces, expect Paid(2)", lathe, parityId);
+        require(_status(lathe, parityId) == LatheOrders.Status.Paid, "Smoke (n): not Paid");
+        (address tp, uint256 tc) = lathe.ruleOf(parityId);
+        require(tp == vm.envAddress("REF_PROCESSOR") && tc == parityTop, "Smoke (n): ruleOf is not the top");
+        for (uint256 x = 0; x < 128; ++x) {
+            uint8 p;
+            for (uint256 b = 0; b < 7; ++b) {
+                p ^= uint8((x >> b) & 1);
+            }
+            bytes memory t = lathe.run{gas: TOP_RUN_GAS}(parityId, abi.encodePacked(uint8(x)));
+            require(t.length == 1 && uint8(t[0]) == p, "Smoke (n): run via the top disagrees with the parity");
+        }
+        console2.log("    run(n) on all 128 inputs = parity of x0..x6 (6 REFs, gas", TOP_RUN_GAS, ")");
     }
 
     /// The bad top's bytes: the order's own expected bytes with the comparator's five input wires rotated by one

@@ -9,7 +9,13 @@ import {IProcessor} from "../../src/ITapeOut.sol";
 /// processor, so a top made of REFs to mock pieces computes what those pieces compute. No LATCH, no memory.
 /// mint stores a netlist with its nIn / nOut and computes the gate count the way TapeOut reports it (NANDs plus
 /// every referenced circuit's gate count). No access control and no checks: test and local-anvil use only.
+/// Gas: each REF record burns REF_GAS before it runs the referenced circuit, so a REF costs about what it costs on
+/// real TapeOut (about 33,000 to 40,000 gas per REF to a small part once warm, about 70,000 for the first one in a
+/// transaction, measured on the X Layer mainnet fork: evidence/2026-11-21-top-run-gas.md). Without it a REF here
+/// would cost a few thousand gas, and a too-small run budget for a top circuit would never show in a test.
 contract RefProcessor {
+    uint256 public constant REF_GAS = 40_000;
+
     struct Info {
         uint32 nIn;
         uint32 nOut;
@@ -80,6 +86,8 @@ contract RefProcessor {
         uint256 cid = _u(nl, at + 21, 8);
         uint256 nIns = uint8(nl[at + 29]);
         uint256 nOuts = uint8(nl[at + 30]);
+        uint256 stopAt = gasleft() > REF_GAS ? gasleft() - REF_GAS : 0;
+        while (gasleft() > stopAt) {}
         bytes memory x = new bytes((nIns + 7) / 8);
         for (uint256 i = 0; i < nIns; ++i) {
             if (s[_u(nl, at + 31 + 3 * i, 3)] == 1) x[i / 8] = bytes1(uint8(x[i / 8]) | uint8(1 << (i % 8)));

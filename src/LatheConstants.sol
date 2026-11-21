@@ -10,6 +10,12 @@ uint256 constant LATHE_MAX_ANSWER_BITS = 16;
 uint256 constant LATHE_EVAL_BASE_GAS = 100_000;
 uint256 constant LATHE_EVAL_GAS_PER_GATE = 15_000;
 uint256 constant LATHE_GAS_RESERVE = 20_000;
+// Extra gas a paid top circuit's run gets per piece (= per REF record in the top), on top of evalBudget(top gates).
+// It is EVAL_BASE_GAS (each piece was checked with 100,000 + 15,000 x its own gates, and the top's gate count is the
+// sum of its pieces' gates, so the top gets at least what every piece was allowed in its own check) plus 50,000 for
+// the REF record itself (about 1.5x the ~33,000 measured per REF to a 1-gate part on the mainnet fork, cold and warm
+// alike once the part is warm). Measured: evidence/2026-11-21-top-run-gas.md.
+uint256 constant LATHE_EVAL_GAS_PER_REF = 150_000;
 // Pieces per order created with explicit wires (V4). 8 is plenty for the target rules (daily cap: 2, two of three:
 // 2, payee guard: a few comparisons joined by yes/no logic). It bounds the work that grows with the piece count:
 // run calls every piece once (8 evals, each within its own per-case budget), payout and deliverTop re-read every
