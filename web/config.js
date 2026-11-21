@@ -13,7 +13,7 @@ export const NETWORKS = {
     rpc: "https://testrpc.xlayer.tech/terigon",
     nativeCurrency: { name: "OKB", symbol: "OKB", decimals: 18 },
     // evidence/2026-11-20-testnet-v0.md, full addresses from broadcast/DeployTestnet.s.sol/1952/run-latest.json
-    lathe: "0x8EC54D31af81b0de2Eda8133fAa7fb86bbD8EC0a",
+    lathe: "0x1E96e90E25E25b6fcb8cc28aa883d5a5df2715f4",
     token: "0x0d56908eac1faac3a400cb4ae695148c115c64d1", // MockUSDT, 6 decimals, public mint(address,uint256)
     factory: "0xA3D218C9D0e7301C5085557c404cDAb611449fAA", // MockFactory
     processor: "0xe2995d1B78F8D6Db6BbdFcCAd2db6aefF8af63C1", // MockProcessor: circuit 1 honest XOR, 2 wrong
