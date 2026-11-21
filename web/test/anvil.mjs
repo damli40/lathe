@@ -46,7 +46,8 @@ export function deployMocks(url) {
 
 /**
  * forge create, unlocked sender. Returns the deployed address. `libraries` are "path:Name:0xaddr" strings for the
- * linked libraries the contract calls (LatheOrders needs LatheChecks and LatheReads; see deployLathe).
+ * linked libraries the contract calls (LatheOrders needs LatheChecks and LatheReads, which both call NetlistLib;
+ * see deployLathe).
  */
 export function forgeCreate(url, contract, ctorArgs = [], libraries = []) {
   const args = ["create", contract, "--rpc-url", url, "--unlocked", "--from", ANVIL_ACCOUNT0, "--broadcast"];
@@ -58,10 +59,15 @@ export function forgeCreate(url, contract, ctorArgs = [], libraries = []) {
   return a;
 }
 
-/** Deploy LatheOrders with forge create: its two linked libraries first, then the contract linked to them. */
+/**
+ * Deploy LatheOrders with forge create: NetlistLib (the top-circuit encoder) first, then the two linked libraries
+ * that call it, then the contract linked to them.
+ */
 export function deployLathe(url, ctorArgs) {
-  const checks = forgeCreate(url, "src/LatheChecks.sol:LatheChecks");
-  const reads = forgeCreate(url, "src/LatheReads.sol:LatheReads");
+  const netlist = forgeCreate(url, "src/NetlistLib.sol:NetlistLib");
+  const nl = [`src/NetlistLib.sol:NetlistLib:${netlist}`];
+  const checks = forgeCreate(url, "src/LatheChecks.sol:LatheChecks", [], nl);
+  const reads = forgeCreate(url, "src/LatheReads.sol:LatheReads", [], nl);
   return forgeCreate(url, "src/LatheOrders.sol:LatheOrders", ctorArgs, [
     `src/LatheChecks.sol:LatheChecks:${checks}`,
     `src/LatheReads.sol:LatheReads:${reads}`,

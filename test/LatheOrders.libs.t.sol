@@ -8,7 +8,8 @@ import {FormulaProcessor} from "./mocks/FormulaProcessor.sol";
 
 /// @notice The contract-size split (V3a fix round): LatheOrders calls two linked libraries, LatheChecks (create-time
 /// rules) and LatheReads (run, runStep, the piece join). These tests pin what the split must not change:
-/// - the runtime stays under the size the next versions need room above (19,500 bytes);
+/// - the runtime stays under the 24,576-byte limit (EIP-170). Until V4 this pinned 19,500 bytes to keep room for the
+///   next versions; V3b and V4 (top circuits, wires) used that room, so it now pins the hard limit;
 /// - run's per-case gas guard still holds across the library hop. LatheOrders forwards only 63/64 of its gas to
 ///   LatheReads (EIP-150), and the guard runs inside LatheReads, so a caller with too little gas still gets
 ///   InsufficientGasForCase (or a plain out-of-gas revert), never an answer, and the gas the page asks for
@@ -62,7 +63,7 @@ contract LatheOrdersLibsTest is LatheBase {
     }
 
     function test_size_underLimitWithRoom() public view {
-        assertLe(address(lathe).code.length, 19_500, "LatheOrders runtime above 19,500 bytes");
+        assertLe(address(lathe).code.length, 24_576, "LatheOrders runtime above the 24,576-byte limit");
     }
 
     function paidXor() internal returns (uint256 id) {

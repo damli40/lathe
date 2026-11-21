@@ -10,6 +10,7 @@ import {BitLib} from "./BitLib.sol";
 import {IProcessor, IProcessorFactory} from "./ITapeOut.sol";
 import {LatheChecks} from "./LatheChecks.sol";
 import {LatheReads} from "./LatheReads.sol";
+import {Wire} from "./NetlistLib.sol";
 import {
     LATHE_MAX_CASE_BITS,
     LATHE_MAX_ANSWER_BITS,
@@ -70,6 +71,18 @@ contract LatheOrders is ReentrancyGuard {
         uint64 blockNumber;
     }
 
+    /// @notice The pieces, tables, gate caps, input names, wires and payment kind of a pieced order created with
+    /// wires (createPiecedOrder with a spec). Each field means what the argument of the same name means in the
+    /// overload without wires.
+    struct PiecedSpec {
+        Piece[] pieces;
+        bytes[] tables;
+        uint32[] maxGates;
+        bytes32[] labels;
+        Wire[] wires;
+        bool needsTop;
+    }
+
     /// @dev Create arguments grouped to keep the stack small.
     struct Terms {
         uint96 amount;
@@ -98,7 +111,7 @@ contract LatheOrders is ReentrancyGuard {
     /// transaction: a wrong answer reverts the delivery, so junk can never hold the order. Larger circuits are
     /// recorded and checked in batches with check().
     uint256 public constant INLINE_CHECK_MAX_GAS = 30_000_000;
-    /// @notice A pieced order has 1 or 2 pieces (V3a). Chains of more pieces need a wiring map (later version).
+    /// @notice Most pieces in an order created with wires (V4). Orders created without wires have 1 or 2 pieces.
     uint256 public constant MAX_PIECES = LATHE_MAX_PIECES;
     /// @notice Formula pieces have at most 17 inputs (131,072 cases), checked in batches with checkPiece.
     uint256 public constant MAX_FORMULA_BITS = LATHE_MAX_FORMULA_BITS;
@@ -127,6 +140,12 @@ contract LatheOrders is ReentrancyGuard {
     mapping(uint256 => mapping(uint256 => bytes)) public pieceTableOf;
     /// @notice Gate cap per piece (zero = no cap).
     mapping(uint256 => mapping(uint256 => uint32)) public pieceMaxGatesOf;
+    /// @notice True for a pieced order the buyer created as "needs a top circuit": it pays only at deliverTop, for
+    /// one circuit made of references to the tested pieces. False ("Lathe joins"): it pays when the last piece
+    /// passes and run joins the pieces. Fixed at create; nothing can change it.
+    mapping(uint256 => bool) public needsTop;
+    /// @dev The wires of a pieced order created with wires, sorted (LatheChecks._sortWires). Empty otherwise.
+    mapping(uint256 => Wire[]) internal _wires;
 
     event OrderCreated(uint256 indexed orderId, address indexed buyer, uint96 amount, uint64 deadline);
     event Delivered(uint256 indexed orderId, address indexed builder, address processor, uint256 circuitId);
@@ -175,6 +194,15 @@ contract LatheOrders is ReentrancyGuard {
     error NoSuchPiece();
     error PieceAlreadyPassed();
     error NoSingleCircuit();
+    error WiringNotForward();
+    error InputUnconnected();
+    error OutputUnconnected();
+    error FedTwice();
+    error BadWire();
+    error TopInputUnused();
+    error TopNeedsLastOutputs();
+    error PiecesNotPassed();
+    error WrongTopCircuit();
 
     constructor(address factory_, address usdt_, address feeRecipient_, uint16 feeBps_) {
         if (feeBps_ > MAX_FEE_BPS) revert FeeTooHigh();
@@ -484,6 +512,81 @@ contract LatheOrders is ReentrancyGuard {
         _pull(amount);
     }
 
+    /// @notice createPiecedOrder with explicit wires for 1 to MAX_PIECES pieces (V4), and the buyer's choice of how
+    /// the order pays, fixed here for good. `spec` holds what the overload without wires takes as separate
+    /// arguments (pieces, tables, maxGates, labels) plus `wires` and `needsTop` (a struct, to keep the stack small):
+    /// - `needsTop` false, "Lathe joins": pays the named builder when the last piece passes; run evaluates the
+    ///   pieces in index order along the wires.
+    /// - `needsTop` true, "needs a top circuit": every piece is still delivered and fully checked, but the order
+    ///   pays only at deliverTop, for one TapeOut circuit made only of references to the passed pieces, wired as
+    ///   `wires` says; ruleOf and run then use that one circuit. Only wirings a REF-only circuit can have are
+    ///   accepted: the order's outputs must be the last output bits of the last piece(s), in order
+    ///   (TopNeedsLastOutputs otherwise; see NetlistLib). Other wirings can still be ordered as "Lathe joins".
+    /// Wires (see Wire and LatheChecks._sortWires for every rule and its error): any order in the list; wires only
+    /// go forward (WiringNotForward); every piece input bit and every order output bit is fed exactly once
+    /// (InputUnconnected, OutputUnconnected, FedTwice); the order's inputs are bits 0 .. nIn-1, each feeding at
+    /// least one piece (TopInputUnused); at most 64 order inputs and 64 outputs. `labels` names the nIn inputs or is
+    /// empty. The other arguments are as in the overload without wires.
+    function createPiecedOrder(PiecedSpec calldata spec, uint96 amount, uint64 deadline, address builder)
+        external
+        nonReentrant
+        returns (uint256 orderId)
+    {
+        orderId = nextOrderId;
+        (uint8 nIn, uint8 nOut) = LatheChecks.storeWiredPieces(
+            spec, _pieces[orderId], pieceTableOf[orderId], pieceMaxGatesOf[orderId], _wires[orderId]
+        );
+        _newOrder(nIn, nOut, 0, Terms(amount, deadline, builder, 0));
+        needsTop[orderId] = spec.needsTop;
+        _setLabels(orderId, spec.labels, nIn);
+        _pull(amount);
+    }
+
+    /// @notice The wires of a pieced order, sorted by where they go (piece 0's inputs, piece 1's, .., then the
+    /// order's outputs). For a pieced order created without wires, its fixed join written as wires; empty for a
+    /// V0-V2 order.
+    function wiresOf(uint256 orderId) external view returns (Wire[] memory) {
+        return LatheReads.wiresOf(_pieces[orderId], _wires[orderId]);
+    }
+
+    /// @notice The exact netlist bytes the top circuit of an order must have, built from the delivered pieces and
+    /// the wires: mint a circuit with these bytes, nIn and nOut on any TapeOut processor, then deliverTop it.
+    /// Reverts PiecesNotPassed until every piece has a delivery (the bytes name each piece's circuit).
+    function expectedTopNetlist(uint256 orderId) public view returns (bytes memory) {
+        Order storage o = orders[orderId];
+        return LatheReads.expectedTop(_pieces[orderId], pieceOf[orderId], _wires[orderId], o.nIn, o.nOut);
+    }
+
+    /// @notice Offer the top circuit of an order that needs one, and be paid for it. The caller must be the named
+    /// builder and own the circuit (as for deliver); `processor` must be a TapeOut processor. Allowed while the
+    /// order is Open, once every piece has passed, until deadline + GRACE (the same window in which a piece
+    /// delivered in time may finish its check). Refuses with:
+    /// - PiecesNotPassed while some piece has not passed; CircuitChanged if a passed piece's circuit changed;
+    /// - ShapeMismatch unless circuitInfo says nIn and nOut of the order and no memory (netlist bytes do not hold
+    ///   nIn or nOut, so the same bytes minted with another shape would wire different signals);
+    /// - WrongTopCircuit unless keccak256(netlist) equals keccak256(expectedTopNetlist(orderId)).
+    /// Then it pays once, with one receipt naming the top circuit; deliveries(orderId) holds the top from then on.
+    /// Why the top is not checked case by case: equal bytes mean the top is exactly one REF to each delivered piece
+    /// circuit, in order, fed from the wires the order names, and TapeOut runs a REF by running that circuit. Every
+    /// piece passed every one of its cases and is re-verified unchanged here, so the top computes the joined rule
+    /// on every input by construction. The REF targets cannot be other circuits: the bytes name exactly the piece
+    /// processors and ids that passed deliverPiece's checks (a registered TapeOut processor, the builder's own
+    /// circuit), and TapeOut refused to mint a REF to an unregistered processor or a missing circuit anyway.
+    /// Gas: run on the top uses the top's own gate count, which includes every referenced gate.
+    function deliverTop(uint256 orderId, address processor, uint256 circuitId) external nonReentrant {
+        Order storage o = orders[orderId];
+        if (!needsTop[orderId]) revert WrongOrderKind();
+        if (o.status != Status.Open) revert NotOpen();
+        if (block.timestamp > uint256(o.deadline) + GRACE) revert GraceOver();
+        if (!_allPassedUnchanged(orderId)) revert PiecesNotPassed();
+        uint32 gates = _acceptCircuit(o, processor, circuitId, o.nIn, o.nOut, 0, 0);
+        Delivery storage d = deliveries[orderId];
+        _record(d, processor, circuitId, gates);
+        if (d.netlistHash != keccak256(expectedTopNetlist(orderId))) revert WrongTopCircuit();
+        emit Delivered(orderId, msg.sender, processor, circuitId);
+        _payOut(orderId, o, o.builder, processor, circuitId, piecedHash(orderId));
+    }
+
     /// @notice Offer circuit `circuitId` on `processor` as piece `pieceIndex` of a pieced order. Same guards as
     /// deliver (named builder, owns the circuit, shape = the piece's nIn / nOut with no memory, gate cap, per-case
     /// budget). A piece with no delivery can be delivered until the deadline; a piece being checked cannot
@@ -570,13 +673,16 @@ contract LatheOrders is ReentrancyGuard {
     /// @notice A pieced order's fingerprint, the tableHash in its receipt: keccak256(abi.encode(pieces, tables)) with
     /// tables[i] = pieceTableOf(orderId, i). It cannot equal a V0 tableHash preimage: abi.encode starts with the
     /// 32-byte offset 0x40, so its first bytes would read as nIn = nOut = 0, which no V0 order has.
+    /// An order created with wires also covers its sorted wires: keccak256(abi.encode(pieces, tables, wiresOf(id))).
     function piecedHash(uint256 orderId) public view returns (bytes32) {
         Piece[] memory ps = _pieces[orderId];
         bytes[] memory ts = new bytes[](ps.length);
         for (uint256 i = 0; i < ps.length; ++i) {
             ts[i] = pieceTableOf[orderId][i];
         }
-        return keccak256(abi.encode(ps, ts));
+        Wire[] memory ws = _wires[orderId];
+        if (ws.length == 0) return keccak256(abi.encode(ps, ts));
+        return keccak256(abi.encode(ps, ts, ws));
     }
 
     function _piece(uint256 orderId, uint256 pieceIndex) internal view returns (Piece memory) {
@@ -593,7 +699,7 @@ contract LatheOrders is ReentrancyGuard {
     {
         d.nextCase = uint32(total);
         emit PiecePassed(orderId, pieceIndex);
-        if (!_allPassedUnchanged(orderId)) return;
+        if (needsTop[orderId] || !_allPassedUnchanged(orderId)) return; // a needs-top order pays at deliverTop
         Delivery storage first = pieceOf[orderId][0];
         bool single = _pieces[orderId].length == 1;
         _payOut(
@@ -694,13 +800,14 @@ contract LatheOrders is ReentrancyGuard {
     }
 
     /// @notice The rule a paid order bought: the circuit that passed every case. Reverts NotPaid otherwise.
-    /// A 2-piece order has no single circuit (Lathe joins its pieces in run), so it reverts NoSingleCircuit; read
-    /// piecesOf and pieceOf instead. A 1-piece order returns its piece's circuit.
+    /// A pieced order of 2 or more pieces paid as "Lathe joins" has no single circuit (run joins its pieces), so it
+    /// reverts NoSingleCircuit; read piecesOf and pieceOf instead. A 1-piece order returns its piece's circuit, and
+    /// an order paid with a top circuit returns the top.
     /// (Kept here, not in LatheReads: as a library call it made this contract 50 bytes larger, measured.)
     function ruleOf(uint256 orderId) external view returns (address processor, uint256 circuitId) {
         if (orders[orderId].status != Status.Paid) revert NotPaid();
-        if (_pieces[orderId].length > 1) revert NoSingleCircuit();
         PaidReceipt storage r = receipts[orderId];
+        if (r.processor == address(0)) revert NoSingleCircuit(); // only a joined order of 2+ pieces is paid with none
         return (r.processor, r.circuitId);
     }
 
@@ -713,7 +820,9 @@ contract LatheOrders is ReentrancyGuard {
     /// Runs in the linked library LatheReads (contract size), which gets 63/64 of the gas left (EIP-150) and makes
     /// the per-case gas check itself, right before the circuit call; so the rule above still holds.
     function run(uint256 orderId, bytes calldata inputs) external view returns (bytes memory outputs) {
-        return LatheReads.run(orders[orderId], _pieces[orderId], deliveries[orderId], pieceOf[orderId], inputs);
+        return LatheReads.run(
+            orders[orderId], _pieces[orderId], deliveries[orderId], pieceOf[orderId], _wires[orderId], inputs
+        );
     }
 
     /// @notice runStep for an order with memory: one tick of the paid circuit from memory `state` (ceil(nState/8)
