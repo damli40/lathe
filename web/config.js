@@ -12,11 +12,11 @@ export const NETWORKS = {
     chainName: "X Layer Testnet",
     rpc: "https://testrpc.xlayer.tech/terigon",
     nativeCurrency: { name: "OKB", symbol: "OKB", decimals: 18 },
-    // evidence/2026-11-20-testnet-v0.md, full addresses from broadcast/DeployTestnet.s.sol/1952/run-latest.json
+    // evidence/2026-11-21-testnet-case-gas.md, full addresses from broadcast/DeployTestnet.s.sol/1952/run-latest.json
     lathe: "0xaf1e479DDA53382D22BE5Dc19c1cc44C1472B6E3",
-    token: "0x0d56908eac1faac3a400cb4ae695148c115c64d1", // MockUSDT, 6 decimals, public mint(address,uint256)
-    factory: "0xA3D218C9D0e7301C5085557c404cDAb611449fAA", // MockFactory
-    processor: "0xe2995d1B78F8D6Db6BbdFcCAd2db6aefF8af63C1", // MockProcessor: circuit 1 honest XOR, 2 wrong
+    token: "0x023870C9B5bA1E4d62e5095e6BC986bc76C97A05", // MockUSDT, 6 decimals, public mint(address,uint256)
+    factory: "0xA37e78c6b42f29b543973132384C4583F6211c39", // MockFactory
+    processor: "0xC2D6fCd615973cD126B29e7091Af6Cf9C462D58d", // MockProcessor: circuit 1 honest XOR, 2 wrong
     parallelReads: true, // the testnet RPC answered 12 parallel calls with 200 (checked 2026-11-21)
     mockMint: true, // the token has a public mint, so the page offers "get test tokens"
     mintAmount: "100", // in whole tokens
