@@ -199,7 +199,7 @@ try {
   console.log("(i) a name with a text-direction control");
   await page.click("#tab-create");
   await page.fill("#f-label-0", "a\u202E");
-  assert(/text-direction/.test(await page.locator("#labels-err").textContent()), "the create form refuses a direction control in a name");
+  assert(/hidden character/.test(await page.locator("#labels-err").textContent()), "the create form refuses a direction control in a name");
   assert(await page.locator("#create-btn").isDisabled(), "and create stays off");
   await page.fill("#f-label-0", "");
   const rlo = "0x" + Buffer.from("x1)\u202E", "utf8").toString("hex").padEnd(64, "0");
