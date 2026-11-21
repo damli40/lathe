@@ -1,7 +1,7 @@
 // Pure parts of scripts/crank.mjs. Run: node --test scripts/test/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { gasCeiling, judgeAfterFailure, batchGasLimit, fitBatch } from '../crank.mjs';
+import { gasCeiling, judgeAfterFailure, batchGasLimit, fitBatch, caseBudget, evalBudget } from '../crank.mjs';
 
 const P = '0x00000000000000000000000000000000000000aa';
 const Z = '0x0000000000000000000000000000000000000000';
@@ -30,4 +30,14 @@ test('after a failed send: judged from the whole piece, not the cursor alone', (
   assert.equal(judgeAfterFailure(before, piece({ status: 2, next: 256 })), 'paid');
   assert.equal(judgeAfterFailure(before, piece({ status: 3, proc: Z })), 'gone');
   assert.equal(judgeAfterFailure(before, piece({ next: 256 })), 'gone'); // passed, order waits for another piece
+});
+
+test('batches are sized from the stored per-case gas; the formula when there is none', () => {
+  assert.equal(caseBudget({ gates: 25, caseGas: null }), evalBudget(25));
+  assert.equal(caseBudget({ gates: 25, caseGas: 0n }), 475_000n);
+  assert.equal(caseBudget({ gates: 25, caseGas: 600_000n }), 600_000n);
+  const base = { gates: 25, netlistBytes: 46, allNetlistBytes: [46], paysAt: () => false };
+  const declared = { ...base, caseGas: 600_000n };
+  assert.ok(batchGasLimit({ ...declared, k: 10 }) - batchGasLimit({ ...base, k: 10 }) === 10n * ((600_000n * 64n + 62n) / 63n - (475_000n * 64n + 62n) / 63n));
+  assert.ok(fitBatch(1000, declared, 30_000_000n) < fitBatch(1000, base, 30_000_000n));
 });

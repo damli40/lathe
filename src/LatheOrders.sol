@@ -53,6 +53,9 @@ contract LatheOrders is ReentrancyGuard {
         uint256 circuitId;
         address builder; // who delivered; the one paid
         uint32 gateCount; // recorded at delivery; check reverts if it changes
+        // Gas each case's eval gets: max(evalBudget(gateCount), the caseGas the builder declared), fixed at
+        // delivery (see deliver with caseGas). 0 for a top circuit, which is never checked case by case.
+        uint32 caseGas;
         bytes32 netlistHash; // keccak256(netlist(circuitId)) at delivery; same rule
         uint32 nextCase; // the next case check will run
     }
@@ -99,23 +102,25 @@ contract LatheOrders is ReentrancyGuard {
     uint256 public constant MAX_CASE_BITS = LATHE_MAX_CASE_BITS; // nIn + nState <= 6, so at most 64 cases
     uint256 public constant MAX_ANSWER_BITS = LATHE_MAX_ANSWER_BITS; // nOut + nState <= 16
 
-    /// @notice Each case's eval gets exactly evalBudget(gateCount) gas, never the caller's leftover gas, so a
-    /// case's result cannot depend on how much gas the caller sent. Running out of the budget is a wrong answer.
+    /// @notice Each case's eval gets exactly the delivery's per-case gas (caseGasOf: evalBudget(gateCount), or more
+    /// when the builder declared more at delivery), never the caller's leftover gas, so a case's result cannot
+    /// depend on how much gas the caller sent. Running out of the budget is a wrong answer.
     /// Measured on X Layer (evidence/2026-11-20-eval-gas-budget.md): ~2,320 gas per real gate, ~10,000 per gate
     /// for circuits built from REFs to the 4-gate XOR. The per-gate figure covers the REF-heavy case with 1.5x.
     uint256 public constant EVAL_BASE_GAS = LATHE_EVAL_BASE_GAS;
     uint256 public constant EVAL_GAS_PER_GATE = LATHE_EVAL_GAS_PER_GATE;
     /// @notice What run gives a paid order's top circuit: evalBudget(top's gate count) + EVAL_GAS_PER_REF x pieces
-    /// (one REF record per piece). On real TapeOut a REF record costs about 33,000 gas or more on its own, far above
+    /// (one REF record per piece), plus, for each piece delivered with a declared caseGas, what that piece got
+    /// above its own evalBudget (so the top gets at least the sum of its pieces' per-case gas). On real TapeOut a REF record costs about 33,000 gas or more on its own, far above
     /// what 15,000 per gate gives a REF to a 1- or 2-gate piece. Since EVAL_GAS_PER_REF >= EVAL_BASE_GAS, the top
     /// also gets at least what every piece was allowed in its own case check. Only run uses it; case checks do not.
     uint256 public constant EVAL_GAS_PER_REF = LATHE_EVAL_GAS_PER_REF;
     /// @notice Gas kept back for the work between the gas check and the call, so eval really gets its budget.
     uint256 public constant GAS_RESERVE = LATHE_GAS_RESERVE;
-    /// @notice Largest budget for one case. A circuit above it could never be checked in one X Layer
+    /// @notice Largest budget for one case, formula or declared. A circuit above it could never be checked in one X Layer
     /// transaction (block gas limit 210M) and would hold the order until deadline + grace, so deliver refuses it.
     uint256 public constant MAX_CASE_GAS = 100_000_000;
-    /// @notice When cases x evalBudget(gateCount) is at most this, deliver checks every case in the same
+    /// @notice When cases x the per-case gas (caseGasOf) is at most this, deliver checks every case in the same
     /// transaction: a wrong answer reverts the delivery, so junk can never hold the order. Larger circuits are
     /// recorded and checked in batches with check().
     uint256 public constant INLINE_CHECK_MAX_GAS = 30_000_000;
@@ -135,7 +140,8 @@ contract LatheOrders is ReentrancyGuard {
     uint256 public feesOwed;
     mapping(uint256 => Order) public orders;
     mapping(uint256 => bytes) public tableOf;
-    mapping(uint256 => Delivery) public deliveries;
+    /// @dev Read through deliveries(id) (the same six fields as before caseGas was added) and caseGasOf(id).
+    mapping(uint256 => Delivery) internal _deliveries;
     mapping(uint256 => PaidReceipt) public receipts;
     /// @dev Optional names for the inputs (then the memory bits), one bytes32 each; empty when none were given.
     mapping(uint256 => bytes32[]) internal _labels;
@@ -143,7 +149,8 @@ contract LatheOrders is ReentrancyGuard {
     mapping(uint256 => Piece[]) internal _pieces;
     /// @notice A pieced order's piece i delivery and check cursor, the same fields as deliveries. Piece states:
     /// no delivery (processor == 0), being checked (nextCase < 2^nIn), passed (nextCase == 2^nIn).
-    mapping(uint256 => mapping(uint256 => Delivery)) public pieceOf;
+    /// Read through pieceOf(id, i) (the six fields of deliveries) and pieceCaseGasOf(id, i).
+    mapping(uint256 => mapping(uint256 => Delivery)) internal _pieceOf;
     /// @notice The truth table of a Table piece (empty for formula pieces).
     mapping(uint256 => mapping(uint256 => bytes)) public pieceTableOf;
     /// @notice Gate cap per piece (zero = no cap).
@@ -211,6 +218,7 @@ contract LatheOrders is ReentrancyGuard {
     error TopNeedsLastOutputs();
     error PiecesNotPassed();
     error WrongTopCircuit();
+    error CaseGasTooHigh();
 
     constructor(address factory_, address usdt_, address feeRecipient_, uint16 feeBps_) {
         if (feeBps_ > MAX_FEE_BPS) revert FeeTooHigh();
@@ -357,16 +365,34 @@ contract LatheOrders is ReentrancyGuard {
     }
 
     /// @notice Offer circuit `circuitId` on `processor` for order `orderId`. The caller must be the order's named
-    /// builder and must own the circuit.
+    /// builder and must own the circuit. Each case gets evalBudget(gates) gas: the same as deliver with caseGas 0.
     function deliver(uint256 orderId, address processor, uint256 circuitId) external nonReentrant {
+        _deliver(orderId, processor, circuitId, 0);
+    }
+
+    /// @notice deliver, with the gas each case's eval gets stated by the builder: max(evalBudget(gates), caseGas),
+    /// at most MAX_CASE_GAS (above it: CaseGasTooHigh). Fixed for this delivery (caseGasOf) and used by every check
+    /// of it, the inline check, run and runStep. Why: the first case of every transaction costs more (the circuits
+    /// it calls are cold, about 30,000 gas more for a circuit of REFs on real TapeOut), and anyone can choose
+    /// which case comes first in a check transaction. A circuit whose cold case needs more than evalBudget would
+    /// pass or fail depending on where a transaction starts; with enough declared gas it passes wherever.
+    /// What to declare: the gas the costliest case needs when it runs alone in a transaction, x 64/63 (TapeOut's
+    /// proxy passes on 63/64 of what it gets), plus a margin. Too little is still a wrong answer: the delivery is
+    /// cleared, the order reopens, no money moves. More only raises the gas a checker must send per case; it
+    /// cannot make a wrong answer pass (the answers are compared exactly as before).
+    function deliver(uint256 orderId, address processor, uint256 circuitId, uint32 caseGas) external nonReentrant {
+        _deliver(orderId, processor, circuitId, caseGas);
+    }
+
+    function _deliver(uint256 orderId, address processor, uint256 circuitId, uint32 caseGas) internal {
         Order storage o = _openOrder(orderId, false);
         uint32 gates = _acceptCircuit(o, processor, circuitId, o.nIn, o.nOut, o.nState, o.maxGates);
-        _requireCheckable(gates);
-        _record(deliveries[orderId], processor, circuitId, gates);
+        Delivery storage d = _deliveries[orderId];
+        _record(d, processor, circuitId, gates, _effectiveCaseGas(gates, caseGas));
         o.status = Status.Checking;
         emit Delivered(orderId, msg.sender, processor, circuitId);
 
-        _checkInlineIfSmall(orderId, o, gates);
+        _checkInlineIfSmall(orderId, o, d);
     }
 
     /// @dev The order exists, is of the expected kind (pieced or not), is Open and the deadline has not passed.
@@ -408,29 +434,37 @@ contract LatheOrders is ReentrancyGuard {
         if (maxGates != 0 && gates > maxGates) revert TooManyGates();
     }
 
-    /// @dev deliver and deliverPiece only: one case must fit in a transaction, or the check could never finish.
-    /// Not applied to a top circuit (deliverTop), which is never checked case by case: its gate count is the sum of
-    /// its pieces' gates, so this guard would refuse an honest top made of big pieces that each passed.
-    function _requireCheckable(uint256 gates) internal pure {
-        if (evalBudget(gates) > MAX_CASE_GAS) revert CircuitTooBigToCheck();
+    /// @dev deliver and deliverPiece only: the gas each case gets, max(evalBudget(gates), declared). One case must
+    /// fit in a transaction, or the check could never finish: a formula budget above MAX_CASE_GAS is
+    /// CircuitTooBigToCheck, a declared one above it CaseGasTooHigh. Not applied to a top circuit (deliverTop),
+    /// which is never checked case by case: its gate count is the sum of its pieces' gates, so this guard would
+    /// refuse an honest top made of big pieces that each passed.
+    function _effectiveCaseGas(uint256 gates, uint256 declared) internal pure returns (uint32) {
+        if (declared > MAX_CASE_GAS) revert CaseGasTooHigh();
+        uint256 b = evalBudget(gates);
+        if (b > MAX_CASE_GAS) revert CircuitTooBigToCheck();
+        return uint32(b > declared ? b : declared);
     }
 
-    /// @dev Record a delivery with its gate count and netlist hash, cursor at case 0.
-    function _record(Delivery storage d, address processor, uint256 circuitId, uint32 gates) internal {
+    /// @dev Record a delivery with its gate count, per-case gas and netlist hash, cursor at case 0.
+    function _record(Delivery storage d, address processor, uint256 circuitId, uint32 gates, uint32 caseGas)
+        internal
+    {
         d.processor = processor;
         d.circuitId = circuitId;
         d.builder = msg.sender;
         d.gateCount = gates;
+        d.caseGas = caseGas;
         d.netlistHash = keccak256(IProcessor(processor).netlist(circuitId));
         d.nextCase = 0;
     }
 
-    /// @dev Small circuit: check every case now and pay. Any wrong answer reverts the whole delivery.
-    function _checkInlineIfSmall(uint256 orderId, Order storage o, uint256 gates) internal {
+    /// @dev Small circuit (cases x per-case gas <= INLINE_CHECK_MAX_GAS): check every case now and pay. Any wrong
+    /// answer reverts the whole delivery.
+    function _checkInlineIfSmall(uint256 orderId, Order storage o, Delivery storage d) internal {
         uint256 total = _cases(o);
-        uint256 budget = evalBudget(gates);
+        uint256 budget = d.caseGas;
         if (total * budget > INLINE_CHECK_MAX_GAS) return;
-        Delivery storage d = deliveries[orderId];
         (bool ok, uint256 c) = _runCases(o, d, tableOf[orderId], 0, total, budget);
         if (!ok) revert WrongAnswer(c);
         d.nextCase = uint32(total);
@@ -445,16 +479,16 @@ contract LatheOrders is ReentrancyGuard {
         if (o.status != Status.Checking) revert NotChecking();
         // A check under way at the deadline may finish during the grace period, not after it.
         if (block.timestamp > uint256(o.deadline) + GRACE) revert GraceOver();
-        Delivery storage d = deliveries[orderId];
+        Delivery storage d = _deliveries[orderId];
         _requireUnchanged(o, d);
 
         uint256 total = _cases(o);
         uint256 start = d.nextCase;
         uint256 end = maxCases >= total - start ? total : start + maxCases;
 
-        (bool ok, uint256 c) = _runCases(o, d, tableOf[orderId], start, end, evalBudget(d.gateCount));
+        (bool ok, uint256 c) = _runCases(o, d, tableOf[orderId], start, end, d.caseGas);
         if (!ok) {
-            delete deliveries[orderId];
+            delete _deliveries[orderId];
             o.status = Status.Open;
             emit Rejected(orderId, c);
             return (true, false);
@@ -478,9 +512,9 @@ contract LatheOrders is ReentrancyGuard {
             : o.status == Status.Open && t > o.deadline && (t > uint256(o.deadline) + GRACE || !_allDelivered(orderId, n));
         if (!allowed) revert RefundNotAllowed();
         o.status = Status.Refunded;
-        delete deliveries[orderId];
+        delete _deliveries[orderId];
         for (uint256 i = 0; i < n; ++i) {
-            delete pieceOf[orderId][i];
+            delete _pieceOf[orderId][i];
         }
         emit Refunded(orderId, msg.sender, o.amount);
         usdt.safeTransfer(msg.sender, o.amount);
@@ -570,7 +604,7 @@ contract LatheOrders is ReentrancyGuard {
     /// Reverts PiecesNotPassed until every piece has a delivery (the bytes name each piece's circuit).
     function expectedTopNetlist(uint256 orderId) public view returns (bytes memory) {
         Order storage o = orders[orderId];
-        return LatheReads.expectedTop(_pieces[orderId], pieceOf[orderId], _wires[orderId], o.nIn, o.nOut);
+        return LatheReads.expectedTop(_pieces[orderId], _pieceOf[orderId], _wires[orderId], o.nIn, o.nOut);
     }
 
     /// @notice Offer the top circuit of an order that needs one, and be paid for it. The caller must be the named
@@ -592,7 +626,7 @@ contract LatheOrders is ReentrancyGuard {
     /// processors and ids that passed deliverPiece's checks (a registered TapeOut processor, the builder's own
     /// circuit), and TapeOut refused to mint a REF to an unregistered processor or a missing circuit anyway.
     /// Gas: run on the top gives it evalBudget(its gate count, which includes every referenced gate) plus
-    /// EVAL_GAS_PER_REF per piece. A piece made of REFs to further circuits costs more per REF than that counts;
+    /// EVAL_GAS_PER_REF per piece, plus what each piece's declared caseGas added above its own evalBudget. A piece made of REFs to further circuits costs more per REF than that counts;
     /// the contract cannot count those nested REFs, so for such a top run may refuse (never a wrong answer) and the
     /// rule is still usable through ruleOf and a direct eval on the processor.
     function deliverTop(uint256 orderId, address processor, uint256 circuitId) external nonReentrant {
@@ -602,8 +636,8 @@ contract LatheOrders is ReentrancyGuard {
         if (block.timestamp > uint256(o.deadline) + GRACE) revert GraceOver();
         if (!_allPassedUnchanged(orderId)) revert PiecesNotPassed();
         uint32 gates = _acceptCircuit(o, processor, circuitId, o.nIn, o.nOut, 0, 0);
-        Delivery storage d = deliveries[orderId];
-        _record(d, processor, circuitId, gates);
+        Delivery storage d = _deliveries[orderId];
+        _record(d, processor, circuitId, gates, 0);
         if (d.netlistHash != keccak256(expectedTopNetlist(orderId))) revert WrongTopCircuit();
         emit Delivered(orderId, msg.sender, processor, circuitId);
         _payOut(orderId, o, o.builder, processor, circuitId, piecedHash(orderId));
@@ -612,28 +646,48 @@ contract LatheOrders is ReentrancyGuard {
     /// @notice Offer circuit `circuitId` on `processor` as piece `pieceIndex` of a pieced order. Same guards as
     /// deliver (named builder, owns the circuit, shape = the piece's nIn / nOut with no memory, gate cap, per-case
     /// budget). A piece with no delivery can be delivered until the deadline; a piece being checked cannot
-    /// (NotOpen) and a passed piece never can (PieceAlreadyPassed). When 2^nIn x evalBudget(gates) <= 30M the piece
+    /// (NotOpen) and a passed piece never can (PieceAlreadyPassed). When 2^nIn x the per-case gas <= 30M the piece
     /// is checked here and a wrong answer reverts; otherwise anyone pushes the check with checkPiece.
     /// For an order that needs a top circuit, a circuit id above 2^64 - 1 can pass here but can never be named by
     /// a REF record, so deliverTop would always revert BadPiece and the buyer refunds after deadline + GRACE. Real
     /// TapeOut ids are sequential from 1, so this is not checked here (it would cost contract size).
+    /// Each case gets evalBudget(gates) gas: the same as deliverPiece with caseGas 0.
     function deliverPiece(uint256 orderId, uint256 pieceIndex, address processor, uint256 circuitId)
         external
         nonReentrant
     {
+        _deliverPiece(orderId, pieceIndex, processor, circuitId, 0);
+    }
+
+    /// @notice deliverPiece with the gas each case gets stated by the builder, exactly as deliver with caseGas:
+    /// max(evalBudget(gates), caseGas), at most MAX_CASE_GAS, fixed for this delivery (pieceCaseGasOf) and used by
+    /// checkPiece, the inline check and run. A top circuit's run budget adds what each piece was given above its
+    /// formula (see run).
+    function deliverPiece(uint256 orderId, uint256 pieceIndex, address processor, uint256 circuitId, uint32 caseGas)
+        external
+        nonReentrant
+    {
+        _deliverPiece(orderId, pieceIndex, processor, circuitId, caseGas);
+    }
+
+    function _deliverPiece(uint256 orderId, uint256 pieceIndex, address processor, uint256 circuitId, uint32 caseGas)
+        internal
+    {
         Order storage o = _openOrder(orderId, true);
         Piece memory p = _undeliveredPiece(orderId, pieceIndex);
-        uint32 gates = _acceptCircuit(o, processor, circuitId, p.nIn, p.nOut, 0, pieceMaxGatesOf[orderId][pieceIndex]);
-        _requireCheckable(gates);
-        Delivery storage d = pieceOf[orderId][pieceIndex];
-        _record(d, processor, circuitId, gates);
+        Delivery storage d = _pieceOf[orderId][pieceIndex];
+        {
+            uint32 cap = pieceMaxGatesOf[orderId][pieceIndex];
+            uint32 gates = _acceptCircuit(o, processor, circuitId, p.nIn, p.nOut, 0, cap);
+            _record(d, processor, circuitId, gates, _effectiveCaseGas(gates, caseGas));
+        }
         emit PieceDelivered(orderId, pieceIndex, processor, circuitId);
         _checkPieceInlineIfSmall(orderId, pieceIndex, o, p, d);
     }
 
     function _undeliveredPiece(uint256 orderId, uint256 pieceIndex) internal view returns (Piece memory p) {
         p = _piece(orderId, pieceIndex);
-        Delivery storage d = pieceOf[orderId][pieceIndex];
+        Delivery storage d = _pieceOf[orderId][pieceIndex];
         if (d.processor != address(0)) {
             if (d.nextCase == uint256(1) << p.nIn) revert PieceAlreadyPassed();
             revert NotOpen();
@@ -649,7 +703,7 @@ contract LatheOrders is ReentrancyGuard {
         Delivery storage d
     ) internal {
         uint256 total = uint256(1) << p.nIn;
-        uint256 budget = evalBudget(d.gateCount);
+        uint256 budget = d.caseGas;
         if (total * budget > INLINE_CHECK_MAX_GAS) return;
         (bool ok, uint256 c) = _runPieceCases(orderId, pieceIndex, p, d, 0, total, budget);
         if (!ok) revert WrongAnswer(c);
@@ -657,7 +711,7 @@ contract LatheOrders is ReentrancyGuard {
     }
 
     /// @notice Run up to `maxCases` more cases of piece `pieceIndex`. Anyone may call, until deadline + GRACE. Each
-    /// case needs evalBudget(gateCount) gas or the whole call reverts (InsufficientGasForCase) and nothing changes,
+    /// case needs the delivery's per-case gas (pieceCaseGasOf) or the whole call reverts (InsufficientGasForCase) and nothing changes,
     /// so too little gas can never mark an honest piece wrong. A wrong case clears only this piece's delivery
     /// (PieceRejected); the other piece keeps its state. When this piece passes and every piece has passed, the
     /// order pays.
@@ -671,7 +725,7 @@ contract LatheOrders is ReentrancyGuard {
         Order storage o = orders[orderId];
         if (_pieces[orderId].length == 0) revert WrongOrderKind();
         Piece memory p = _piece(orderId, pieceIndex);
-        Delivery storage d = pieceOf[orderId][pieceIndex];
+        Delivery storage d = _pieceOf[orderId][pieceIndex];
         uint256 total = uint256(1) << p.nIn;
         if (o.status != Status.Open || d.processor == address(0) || d.nextCase >= total) revert NotChecking();
         if (block.timestamp > uint256(o.deadline) + GRACE) revert GraceOver();
@@ -679,9 +733,9 @@ contract LatheOrders is ReentrancyGuard {
 
         uint256 start = d.nextCase;
         uint256 end = maxCases >= total - start ? total : start + maxCases;
-        (bool ok, uint256 c) = _runPieceCases(orderId, pieceIndex, p, d, start, end, evalBudget(d.gateCount));
+        (bool ok, uint256 c) = _runPieceCases(orderId, pieceIndex, p, d, start, end, d.caseGas);
         if (!ok) {
-            delete pieceOf[orderId][pieceIndex];
+            delete _pieceOf[orderId][pieceIndex];
             emit PieceRejected(orderId, pieceIndex, c);
             return (true, false);
         }
@@ -689,6 +743,42 @@ contract LatheOrders is ReentrancyGuard {
         if (end < total) return (false, false);
         _piecePassed(orderId, pieceIndex, o, d, total);
         return (true, true);
+    }
+
+    /// @notice The delivery of a V0-V2 order (for an order that needs a top circuit: the top, once delivered):
+    /// circuit, who delivered, gate count and netlist hash at delivery, and the next case check will run. All
+    /// zero when there is none. The per-case gas is caseGasOf.
+    function deliveries(uint256 orderId)
+        external
+        view
+        returns (address processor, uint256 circuitId, address builder, uint32 gateCount, bytes32 netlistHash, uint32 nextCase)
+    {
+        return _fields(_deliveries[orderId]);
+    }
+
+    /// @notice Piece `i`'s delivery, the same fields as deliveries. Piece states: no delivery (processor == 0),
+    /// being checked (nextCase < 2^nIn), passed (nextCase == 2^nIn). The per-case gas is pieceCaseGasOf.
+    function pieceOf(uint256 orderId, uint256 i)
+        external
+        view
+        returns (address processor, uint256 circuitId, address builder, uint32 gateCount, bytes32 netlistHash, uint32 nextCase)
+    {
+        return _fields(_pieceOf[orderId][i]);
+    }
+
+    function _fields(Delivery storage d) internal view returns (address, uint256, address, uint32, bytes32, uint32) {
+        return (d.processor, d.circuitId, d.builder, d.gateCount, d.netlistHash, d.nextCase);
+    }
+
+    /// @notice The gas each case of this order's delivery gets: max(evalBudget(gateCount), the declared caseGas).
+    /// 0 when there is no delivery, and for a top circuit (never checked case by case; see run for its budget).
+    function caseGasOf(uint256 orderId) external view returns (uint256) {
+        return _deliveries[orderId].caseGas;
+    }
+
+    /// @notice caseGasOf for piece `i` of a pieced order. 0 when the piece has no delivery.
+    function pieceCaseGasOf(uint256 orderId, uint256 i) external view returns (uint256) {
+        return _pieceOf[orderId][i].caseGas;
     }
 
     /// @notice The pieces of a pieced order (empty for a V0-V2 order).
@@ -727,7 +817,7 @@ contract LatheOrders is ReentrancyGuard {
         d.nextCase = uint32(total);
         emit PiecePassed(orderId, pieceIndex);
         if (needsTop[orderId] || !_allPassedUnchanged(orderId)) return; // a needs-top order pays at deliverTop
-        (address p, uint256 id) = LatheReads.singleCircuit(_pieces[orderId], pieceOf[orderId], _wires[orderId]);
+        (address p, uint256 id) = LatheReads.singleCircuit(_pieces[orderId], _pieceOf[orderId], _wires[orderId]);
         _payOut(orderId, o, o.builder, p, id, piecedHash(orderId));
     }
 
@@ -737,18 +827,18 @@ contract LatheOrders is ReentrancyGuard {
         Piece[] storage ps = _pieces[orderId];
         uint256 n = ps.length;
         for (uint256 i = 0; i < n; ++i) {
-            Delivery storage e = pieceOf[orderId][i];
+            Delivery storage e = _pieceOf[orderId][i];
             if (e.processor == address(0) || e.nextCase != uint256(1) << ps[i].nIn) return false;
         }
         for (uint256 i = 0; i < n; ++i) {
-            _requireSame(pieceOf[orderId][i], ps[i].nIn, ps[i].nOut, 0);
+            _requireSame(_pieceOf[orderId][i], ps[i].nIn, ps[i].nOut, 0);
         }
         return true;
     }
 
     function _allDelivered(uint256 orderId, uint256 n) internal view returns (bool) {
         for (uint256 i = 0; i < n; ++i) {
-            if (pieceOf[orderId][i].processor == address(0)) return false;
+            if (_pieceOf[orderId][i].processor == address(0)) return false;
         }
         return true;
     }
@@ -835,14 +925,14 @@ contract LatheOrders is ReentrancyGuard {
     /// @notice Run the paid circuit of an order without memory on `inputs` (ceil(nIn/8) bytes, LSB first, bits
     /// above nIn zero). Returns the outputs as ceil(nOut/8) bytes with the padding bits above nOut zeroed, which
     /// is exactly what check compared. The same guards as check apply: the order must be Paid, the circuit must be
-    /// unchanged since delivery (else CircuitChanged), and eval gets exactly evalBudget(gateCount) gas, so a caller
+    /// unchanged since delivery (else CircuitChanged), and eval gets exactly the per-case gas (caseGasOf), so a caller
     /// with too little gas (for example an RPC that caps eth_call) gets InsufficientGasForCase, never an answer.
     /// Any revert inside eval reverts this call.
     /// Runs in the linked library LatheReads (contract size), which gets 63/64 of the gas left (EIP-150) and makes
     /// the per-case gas check itself, right before the circuit call; so the rule above still holds.
     function run(uint256 orderId, bytes calldata inputs) external view returns (bytes memory outputs) {
         return LatheReads.run(
-            orders[orderId], _pieces[orderId], deliveries[orderId], pieceOf[orderId], _wires[orderId], inputs
+            orders[orderId], _pieces[orderId], _deliveries[orderId], _pieceOf[orderId], _wires[orderId], inputs
         );
     }
 
@@ -854,7 +944,7 @@ contract LatheOrders is ReentrancyGuard {
         view
         returns (bytes memory newState, bytes memory outputs)
     {
-        return LatheReads.runStep(orders[orderId], deliveries[orderId], state, inputs);
+        return LatheReads.runStep(orders[orderId], _deliveries[orderId], state, inputs);
     }
 
     /// @dev A call can pass on at most 63/64 of the gas left (EIP-150); keep enough so the circuit gets all of

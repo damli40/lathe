@@ -9,6 +9,10 @@
 //      re-reads the piece, says Rejected, exits 2, and sends nothing more.
 //   5. the netlist sizes for the paying batch are read again: piece 1 is delivered while piece 0 is being cranked,
 //      and the last batch's gas limit counts piece 1's netlist.
+//   6. a piece delivered with a declared per-case gas (deliverPiece with caseGas): the crank reads it back
+//      (pieceCaseGasOf), sizes every batch from it, and the piece is Paid. The same circuit delivered without the
+//      declared gas is Rejected at the first case of the second batch (circuit 5 of DeployTestnet.s.sol costs more
+//      than its formula budget when a case runs first in a transaction).
 // Run from the repo root: node scripts/test/crank-anvil.mjs
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs';
@@ -148,6 +152,27 @@ try {
     r = crank(['--order', o5, '--piece', '0', '--batch', '100', ...me], { PATH: fakeDir + ':' + process.env.PATH, REAL_CAST, FAKE_LOG: join(fakeDir, 'log5'), FAKE_HOOK_AT: '2', FAKE_HOOK_ARGS: JSON.stringify(hook) });
     assert(new RegExp(`netlists read again \\(${netA + netB} bytes over 2 piece\\(s\\)\\)`).test(r.out), `the paying batch counts both netlists (${netA} + ${netB} bytes; piece 1 was delivered after the start)`);
     assert(r.code === 0 && status(o5) === 2, 'the last batch paid the two-piece order');
+  });
+
+  await step('6. a declared per-case gas sizes the batches', async () => {
+    const PAR = '0x9669699669969669'; // parity of 6 inputs
+    const o6 = create(['(0,6,1,0,0)'], [PAR]);
+    send(L, 'deliverPiece(uint256,uint256,address,uint256,uint32)', o6, '0', m.processor, '5', '600000');
+    assert(first(castOut('call', L, 'pieceCaseGasOf(uint256,uint256)(uint256)', o6, '0')) === '600000', 'pieceCaseGasOf is 600000');
+    r = crank(['--order', o6, '--piece', '0', '--batch', '100', ...me]);
+    assert(/25 gates, budget 600000 gas per case \(declared by the builder\)/.test(r.out), 'prints the declared budget, not the formula (475000)');
+    const limits = [...r.out.matchAll(/gas used \d+ of (\d+)/g)].map((x) => BigInt(x[1]));
+    const plan = r.out.match(/plan: \d+ transaction\(s\) of up to (\d+) cases/);
+    const k = BigInt(plan ? plan[1] : 0);
+    assert(k > 0n && limits.length >= 2 && limits[0] >= k * ((600_000n * 64n + 62n) / 63n), `each batch's gas limit holds ${k} x 600,000 x 64/63 (${limits.length} transactions)`);
+    assert(limits.every((g) => g <= 30_000_000n), 'and stays under the 30M block');
+    assert(r.code === 0 && status(o6) === 2, 'checked across several transactions to Paid');
+
+    const o6b = create(['(0,6,1,0,0)'], [PAR]);
+    deliverPiece(o6b, 0, m.processor, 5);
+    r = crank(['--order', o6b, '--piece', '0', '--batch', '100', ...me]);
+    assert(/budget 475000 gas per case \(formula\)/.test(r.out), 'without it: the formula budget');
+    assert(r.code === 2 && /Rejected: piece 0 answered case \d+ wrong/.test(r.out), 'and the honest circuit is rejected where the second batch starts (exit 2)');
   });
 } catch (e) {
   failed = true;

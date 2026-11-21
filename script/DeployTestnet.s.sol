@@ -17,6 +17,11 @@ import {RefProcessor} from "../test/mocks/RefProcessor.sol";
 ///       circuit 3 = honest toggle with one memory bit: 1 input, 1 output, 1 memory bit, 4 gates. Case c has
 ///         x0 = c & 1 and memory s = c >> 1; new memory = s XOR x0, output = new memory (table 0x3c);
 ///       circuit 4 = the same toggle, wrong in case 3 only (x0 = 1, s = 1: new memory 1 instead of 0);
+///       circuit 5 = honest 6-input parity, 25 gates (formula budget 475,000 per case), that costs more on the first
+///         call of a transaction, like a real circuit of REFs: every call reads 50 storage slots nothing else
+///         touches (about 105,000 gas cold, 5,000 warm) and burns 420,000 gas (case 0: 280,000). So every case
+///         fits its formula budget when warm, and every case but 0 does not when it runs first in a transaction.
+///         Smoke.s.sol (o) delivers it with a declared per-case gas (see LatheOrders.deliver with caseGas);
 ///   - FormulaProcessor (mock circuits that compute a + b or a >= b, test/mocks/FormulaProcessor.sol), registered with
 ///     the mock factory, with four circuits owned by the deployer, all 4 gates (budget 160,000 gas per case), for
 ///     pieced orders (a and b are read LSB first: a = the low widthA input bits, b = the next widthB bits):
@@ -41,6 +46,8 @@ contract DeployTestnet is Script {
     uint256 public constant WRONG_ID = 2;
     uint256 public constant TOGGLE_ID = 3;
     uint256 public constant WRONG_TOGGLE_ID = 4;
+    uint256 public constant COLD_ID = 5;
+    uint32 public constant COLD_GATES = 25;
     uint256 public constant ADD22_ID = 1; // on the FormulaProcessor
     uint256 public constant GE32_ID = 2;
     uint256 public constant GE32_WRONG_ID = 3;
@@ -97,6 +104,8 @@ contract DeployTestnet is Script {
         processor.setOuts(WRONG_TOGGLE_ID, tog);
         processor.setNewStates(WRONG_TOGGLE_ID, wrongState);
 
+        _setUpCold(processor, deployer);
+
         FormulaProcessor formula = new FormulaProcessor();
         factory.setCPU(address(formula), true);
         formula.setCircuit(ADD22_ID, deployer, true, 2, 2, FORMULA_GATES);
@@ -121,6 +130,7 @@ contract DeployTestnet is Script {
         console2.log("WRONG_ID", WRONG_ID);
         console2.log("TOGGLE_ID", TOGGLE_ID);
         console2.log("WRONG_TOGGLE_ID", WRONG_TOGGLE_ID);
+        console2.log("COLD_ID", COLD_ID);
         console2.log("FORMULA_PROCESSOR", address(formula));
         console2.log("ADD22_ID", ADD22_ID);
         console2.log("GE32_ID", GE32_ID);
@@ -128,5 +138,22 @@ contract DeployTestnet is Script {
         console2.log("GE66_ID", GE66_ID);
         console2.log("GE23_ID", GE23_ID);
         console2.log("REF_PROCESSOR", address(refProcessor));
+    }
+
+    /// Circuit 5 (see the contract comment): parity of 6 inputs, dearer on the first call of a transaction.
+    function _setUpCold(MockProcessor processor, address deployer) internal {
+        bytes[] memory outs = new bytes[](64);
+        for (uint256 c = 0; c < 64; ++c) {
+            uint256 p;
+            for (uint256 b = 0; b < 6; ++b) {
+                p ^= (c >> b) & 1;
+            }
+            outs[c] = p == 1 ? bytes(hex"01") : bytes(hex"00");
+        }
+        processor.setCircuit(COLD_ID, deployer, 6, 1, 0, COLD_GATES);
+        processor.setOuts(COLD_ID, outs);
+        processor.setColdSlots(COLD_ID, 50);
+        processor.setEvalGasCost(COLD_ID, 420_000);
+        processor.setCaseGasCost(COLD_ID, 0, 280_000);
     }
 }

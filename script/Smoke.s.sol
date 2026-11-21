@@ -11,7 +11,7 @@ import {MockProcessor} from "../test/mocks/MockProcessor.sol";
 
 /// @notice Testnet smoke run (chain 1952) against the contracts DeployTestnet made.
 /// Env: LATHE, USDT, PROCESSOR, XOR_ID, WRONG_ID, FORMULA_PROCESSOR, REF_PROCESSOR; optional TOGGLE_ID (default 3),
-/// WRONG_TOGGLE_ID (default 4), ADD22_ID (1), GE32_ID (2), GE32_WRONG_ID (3), GE66_ID (4), GE23_ID (5),
+/// WRONG_TOGGLE_ID (default 4), COLD_ID (5), ADD22_ID (1), GE32_ID (2), GE32_WRONG_ID (3), GE66_ID (4), GE23_ID (5),
 /// REFUND_DELAY (seconds, default 900: on a slow public RPC the script takes several minutes to simulate before it sends, and a 300 s deadline had already passed when the order was sent).
 /// The broadcaster must be the deployer (it owns the mock circuits and holds the mUSDT). Every order names the
 /// broadcaster as its builder: the contract refuses an order without one (BuilderRequired).
@@ -53,6 +53,12 @@ import {MockProcessor} from "../test/mocks/MockProcessor.sol";
 ///       REF_PROCESSOR and delivers it. run on all 128 inputs must equal the parity. The REF processor charges about
 ///       what a real REF record costs, so this run fails if the top's run budget ever drops back to
 ///       evalBudget(gates) alone (6 one-gate pieces get 190,000 then, far below 6 REFs).
+///   (o) the split-check fix. Circuit 5 on the mock PROCESSOR is an honest 6-input parity whose cases cost more than
+///       their formula budget (475,000) when they run first in a transaction (DeployTestnet.s.sol). It is delivered
+///       with a declared per-case gas of 600,000 (deliver with caseGas) and checked in five transactions that start
+///       at awkward cases (7, 1, 13, 2, then 41 cases): Paid. Then the same circuit delivered without the declared
+///       gas is SIMULATED (never sent) under a stranger-style split, check(7) then check(1), each from a cold
+///       start (vm.cool): it is rejected at case 7 and the order goes back to Open. That is what the fix is for.
 contract Smoke is Script {
     bytes internal constant XOR_TABLE = hex"06"; // cases 0..3 -> 0,1,1,0, LSB first
     /// Toggle: case c = x0 + 2s; new memory = s XOR x0, output = new memory; answers 0,3,3,0 = 0x3c.
@@ -72,6 +78,10 @@ contract Smoke is Script {
     uint256 internal constant TOP_RUN_GAS = 3_000_000;
     uint256 internal constant PARITY_PIECE_ID = 9; // on the mock PROCESSOR, set up by (n)
     uint256 internal parityId;
+    /// (o): the declared delivery's order, its per-case gas and the split points of its check transactions.
+    uint256 internal coldId;
+    uint32 internal constant COLD_CASE_GAS = 600_000;
+    bytes internal constant PARITY6 = hex"9669699669969669";
     uint256 internal parityTop;
 
     /// Ids of the two memory orders, (d) and (e). Kept in the script's storage to keep run()'s stack small.
@@ -104,7 +114,7 @@ contract Smoke is Script {
 
         vm.startBroadcast();
         (, address me,) = vm.readCallers();
-        usdt.approve(address(lathe), 12 * uint256(AMOUNT));
+        usdt.approve(address(lathe), 14 * uint256(AMOUNT));
 
         // (a) honest XOR -> Paid
         uint256 a = lathe.createOrder(2, 1, XOR_TABLE, AMOUNT, deadline, me, 0);
@@ -125,6 +135,7 @@ contract Smoke is Script {
         _sendMemoryOrders(lathe, me, processor);
         _sendPiecedOrders(lathe);
         _sendWiredOrders(lathe);
+        _sendCaseGasOrder(lathe, me, processor);
         vm.stopBroadcast();
 
         _logStatus("(a) honest XOR, expect Paid(2)", lathe, a);
@@ -185,6 +196,38 @@ contract Smoke is Script {
         _piecedChecks(lathe, me);
         _wiredChecks(lathe, me);
         _parityChecks(lathe);
+        _caseGasChecks(lathe, me, processor);
+    }
+
+    /// (o), sent inside run()'s broadcast: deliver with a declared per-case gas, then five check transactions.
+    function _sendCaseGasOrder(LatheOrders lathe, address me, address processor) internal {
+        uint256 cid = vm.envOr("COLD_ID", uint256(5));
+        coldId = lathe.createOrder(6, 1, PARITY6, AMOUNT, uint64(block.timestamp + 1 days), me, 0);
+        lathe.deliver{gas: 3_000_000}(coldId, processor, cid, COLD_CASE_GAS);
+        uint256[5] memory splits = [uint256(7), 1, 13, 2, 41];
+        for (uint256 k = 0; k < 5; ++k) {
+            // Each case holds 600,000 x 64/63 + 20,000 before its eval; 700,000 a case leaves room.
+            lathe.check{gas: 500_000 + splits[k] * 700_000}(coldId, splits[k]);
+        }
+    }
+
+    /// Checks for (o), and the simulated delivery without the declared gas.
+    function _caseGasChecks(LatheOrders lathe, address me, address processor) internal {
+        uint256 cid = vm.envOr("COLD_ID", uint256(5));
+        _logStatus("(o) declared per-case gas 600,000, checked as 7 + 1 + 13 + 2 + 41 cases, expect Paid(2)", lathe, coldId);
+        require(_status(lathe, coldId) == LatheOrders.Status.Paid, "Smoke (o): not Paid");
+        require(lathe.caseGasOf(coldId) == COLD_CASE_GAS, "Smoke (o): caseGasOf");
+        vm.prank(me);
+        uint256 q = lathe.createOrder(6, 1, PARITY6, AMOUNT, uint64(block.timestamp + 1 days), me, 0);
+        vm.prank(me);
+        lathe.deliver(q, processor, cid);
+        require(lathe.caseGasOf(q) == lathe.evalBudget(25), "Smoke (o): formula caseGas");
+        vm.cool(processor);
+        lathe.check(q, 7);
+        vm.cool(processor);
+        (bool done, bool passed) = lathe.check(q, 1);
+        require(done && !passed && _status(lathe, q) == LatheOrders.Status.Open, "Smoke (o): split did not reject");
+        console2.log("    without the declared gas (simulated, not sent): check(7) then check(1) rejects case 7");
     }
 
     /// The daily-cap shape on 2-bit numbers. Wires listed in sorted form: piece 0's inputs, piece 1's, the output.

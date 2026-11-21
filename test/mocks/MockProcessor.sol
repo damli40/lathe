@@ -29,6 +29,12 @@ contract MockProcessor {
     mapping(uint256 => bool) public revertEval;
     mapping(uint256 => bool) public burnGasEval;
     mapping(uint256 => uint256) public evalGasCost; // extra gas eval burns before answering (0 = none)
+    /// Per-case override of evalGasCost (0 = use evalGasCost): case c = inputs + (state << nIn).
+    mapping(uint256 => mapping(uint256 => uint256)) public caseGasCost;
+    /// Storage slots eval reads on every call (never written). Like the circuits a real REF-heavy circuit calls:
+    /// the first call in a transaction finds them cold (2,100 gas each, EIP-2929), later calls warm (100 each).
+    mapping(uint256 => uint256) public coldSlots;
+    mapping(uint256 => mapping(uint256 => uint256)) internal ballast;
 
     function setCircuit(uint256 id, address who, uint32 nIn, uint32 nOut, uint32 nState, uint32 gates) external {
         owner[id] = who;
@@ -83,6 +89,17 @@ contract MockProcessor {
         evalGasCost[id] = cost;
     }
 
+    /// Make case `c` burn `cost` instead of evalGasCost (0 = back to evalGasCost).
+    function setCaseGasCost(uint256 id, uint256 c, uint256 cost) external {
+        caseGasCost[id][c] = cost;
+    }
+
+    /// Make every eval / step of circuit `id` read `n` storage slots that nothing else touches: about 2,000 x n gas
+    /// more on the first call of a transaction than on later ones.
+    function setColdSlots(uint256 id, uint256 n) external {
+        coldSlots[id] = n;
+    }
+
     function ownerOf(uint256 id) external view returns (address) {
         address o = owner[id];
         require(o != address(0), "ERC721NonexistentToken");
@@ -99,7 +116,7 @@ contract MockProcessor {
     }
 
     function eval(uint256 id, bytes calldata inputs) external view returns (bytes memory) {
-        _burn(id);
+        _burn(id, _num(inputs));
         require(info[id].nState == 0, "has latch: use step");
         return outs[id][_num(inputs)];
     }
@@ -110,8 +127,8 @@ contract MockProcessor {
         view
         returns (bytes memory newState, bytes memory outputs)
     {
-        _burn(id);
         uint256 c = _num(inputs) | (_num(state) << info[id].nIn);
+        _burn(id, c);
         return (newStates[id][c], outs[id][c]);
     }
 
@@ -121,8 +138,14 @@ contract MockProcessor {
         }
     }
 
-    function _burn(uint256 id) internal view {
+    function _burn(uint256 id, uint256 c) internal view {
         require(!revertEval[id], "eval reverted");
+        uint256 n = coldSlots[id];
+        uint256 sink;
+        for (uint256 i = 0; i < n; ++i) {
+            sink |= ballast[id][i];
+        }
+        require(sink == 0, "ballast");
         if (burnGasEval[id]) {
             // Spin until out of gas, like a circuit far too big for the gas given.
             uint256 x;
@@ -130,7 +153,8 @@ contract MockProcessor {
                 x++;
             }
         }
-        uint256 cost = evalGasCost[id];
+        uint256 cost = caseGasCost[id][c];
+        if (cost == 0) cost = evalGasCost[id];
         if (cost > 0) {
             // If cost is more than the gas left, this spins until out of gas.
             uint256 stopAt = gasleft() > cost ? gasleft() - cost : 0;

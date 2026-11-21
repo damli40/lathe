@@ -71,7 +71,7 @@ contract LatheOrdersInlineTest is LatheBase {
         for (uint256 g = 100_000; g < 800_000; g += 5_000) {
             vm.prank(builder);
             (bool ok, bytes memory ret) =
-                address(lathe).call{gas: g}(abi.encodeCall(lathe.deliver, (id, address(proc), SMALL_XOR)));
+                address(lathe).call{gas: g}(abi.encodeWithSignature("deliver(uint256,address,uint256)", id, address(proc), SMALL_XOR));
             if (ok) {
                 assertEq(uint8(status(id)), uint8(LatheOrders.Status.Paid));
                 break;

@@ -40,10 +40,17 @@ library LatheReads {
             if (ws.length == 0) return _runPieces(ps, pds, x);
             return BitLib.pack(_runChain(ps, pds, ws, x, o.nOut), o.nOut);
         }
-        for (uint256 k = 0; k < ps.length; ++k) {
-            _requireSame(pds[k], ps[k].nIn, ps[k].nOut, 0);
+        uint256 budget = d.caseGas;
+        if (ps.length != 0) {
+            // A top: its formula, plus what each piece's declared caseGas gave it above the piece's own formula.
+            // Stored caseGas >= _evalBudget(gateCount) always, and _requireSame first makes sure gateCount is current.
+            budget = _evalBudget(d.gateCount) + LATHE_EVAL_GAS_PER_REF * ps.length;
+            for (uint256 k = 0; k < ps.length; ++k) {
+                _requireSame(pds[k], ps[k].nIn, ps[k].nOut, 0);
+                budget += pds[k].caseGas - _evalBudget(pds[k].gateCount);
+            }
         }
-        uint256 budget = _paidBudget(o, d, ps.length);
+        _paidBudget(o, d, budget);
         return _low(IProcessor(d.processor).eval{gas: budget}(d.circuitId, inputs), o.nOut);
     }
 
@@ -126,7 +133,8 @@ library LatheReads {
     ) external view returns (bytes memory newState, bytes memory outputs) {
         if (o.status != LatheOrders.Status.Paid) revert LatheOrders.NotPaid();
         if (o.nState == 0 || !_fits(inputs, o.nIn) || !_fits(state, o.nState)) revert LatheOrders.BadInputs();
-        uint256 budget = _paidBudget(o, d, 0);
+        uint256 budget = d.caseGas;
+        _paidBudget(o, d, budget);
         (newState, outputs) = IProcessor(d.processor).step{gas: budget}(d.circuitId, state, inputs);
         return (_low(newState, o.nState), _low(outputs, o.nOut));
     }
@@ -179,7 +187,7 @@ library LatheReads {
     /// @dev One eval of a paid piece with run's guards: unchanged circuit, full budget, enough output bytes.
     function _evalPiece(LatheOrders.Delivery storage d, Piece memory p, uint256 x) private view returns (uint256) {
         _requireSame(d, p.nIn, p.nOut, 0);
-        uint256 budget = _evalBudget(d.gateCount);
+        uint256 budget = d.caseGas;
         bytes memory inputs = BitLib.pack(x, p.nIn);
         _requireCaseGas(budget);
         bytes memory out = IProcessor(d.processor).eval{gas: budget}(d.circuitId, inputs);
@@ -187,16 +195,10 @@ library LatheReads {
         return BitLib.lowBits(out, p.nOut);
     }
 
-    /// @dev The circuit must be the one delivered, and the caller must leave room for its full budget:
-    /// evalBudget(gateCount), plus EVAL_GAS_PER_REF for each of the `refs` REF records of a top circuit (one per
-    /// piece; 0 for a V0-V2 circuit). See LatheOrders.EVAL_GAS_PER_REF.
-    function _paidBudget(LatheOrders.Order storage o, LatheOrders.Delivery storage d, uint256 refs)
-        private
-        view
-        returns (uint256 budget)
-    {
+    /// @dev The circuit must be the one delivered, and the caller must leave room for its full `budget`: the
+    /// delivery's caseGas for a V0-V2 circuit; for a top, see run (and LatheOrders.EVAL_GAS_PER_REF).
+    function _paidBudget(LatheOrders.Order storage o, LatheOrders.Delivery storage d, uint256 budget) private view {
         _requireSame(d, o.nIn, o.nOut, o.nState);
-        budget = _evalBudget(d.gateCount) + LATHE_EVAL_GAS_PER_REF * refs;
         _requireCaseGas(budget);
     }
 

@@ -49,9 +49,11 @@ Nested: N1 = one REF to NAND (1 gate). 1 REF to N1: budget 115,000, cost 109,517
 
 ## The crank
 
-`scripts/crank.mjs` only pushes the check forward; it gives each case the same budget. A REF-heavy piece over the line is rejected at its first case (`Rejected`, exit 2), the same as any wrong circuit. Nothing in the crank changes.
+`scripts/crank.mjs` only pushes the check forward; it gives each case the same budget. A REF-heavy piece over the line is rejected (`Rejected`, exit 2), the same as any wrong circuit.
 
-## Proposed contract change (not made)
+**Correction (2026-11-21, final review):** this file said such a circuit is rejected "at its first case". That was wrong. The figures above are for a case run first in a transaction (cold). Later cases in the same transaction are warm and cheaper, so the verdict depended on where each check transaction started, which anyone can choose: the same honest circuit could be paid in one transaction and rejected under a stranger's split. The fix (builder-declared per-case gas) and the reproduction are in [2026-11-21-case-gas-fix.md](2026-11-21-case-gas-fix.md).
+
+## Proposed contract change (made later the same day: see 2026-11-21-case-gas-fix.md; it stores the value in `Delivery` as a `uint32` and keeps the two getters' shapes)
 
 Smallest change that removes the limit: **let the builder state the gas each case gets, at delivery.** New overloads `deliver(orderId, processor, circuitId, caseGas)` and `deliverPiece(orderId, pieceIndex, processor, circuitId, caseGas)`; the delivery records `max(evalBudget(gates), caseGas)` (still at most `MAX_CASE_GAS`, else `CircuitTooBigToCheck`) and every case check and `run` uses that recorded figure instead of `evalBudget(gates)`. The builder knows what their circuit costs (they can run `eval` with a capped gas limit first, which the page already suggests), and a higher figure only makes the check cost more to whoever runs it; it cannot make a wrong circuit pass or hold the order longer than today. It covers nested REFs at any depth, which no formula on the gate count can.
 

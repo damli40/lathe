@@ -14,9 +14,17 @@ const HELP = `usage: node scripts/crank.mjs --lathe ADDR --order N --piece I --b
                   chain's block gas limit)
   --max-gas G     highest gas limit for one transaction (default 200000000; X Layer blocks hold 210M)
   --chain-id N    stop before sending anything if the RPC is on another chain (X Layer: 196, testnet: 1952)
-  --dry           read the order and print the plan (batches, gas limit per batch, worst-case cost); send nothing`;
+  --dry           read the order and print the plan (batches, gas limit per batch, worst-case cost); send nothing
 
-// Gas maths. Each case's eval gets exactly evalBudget(gateCount) gas, and the contract refuses to start a case
+The crank only checks. The builder delivers first, with cast:
+  deliverPiece(uint256,uint256,address,uint256)            each case gets 100,000 + 15,000 x gates
+  deliverPiece(uint256,uint256,address,uint256,uint32)     the same with --case-gas N: each case gets
+      max(formula, N), at most 100,000,000. Declare N = (gas the costliest case needs when it runs first in a
+      transaction) x 64/63 + a margin. The crank reads it back (pieceCaseGasOf) and sizes every batch from it.`;
+
+// Gas maths. Each case's eval gets exactly the delivery's per-case gas: pieceCaseGasOf(order, piece), which is
+// evalBudget(gateCount) or more if the builder declared more at delivery (deliverPiece with caseGas). A contract
+// from before that getter gave evalBudget(gateCount): the script falls back to it. The contract refuses to start a case
 // unless gasleft() >= budget * 64/63 + GAS_RESERVE (LatheOrders._requireCaseGas). A circuit may use all of its
 // budget, so the only gas limit that can never fail with InsufficientGasForCase is sized from the budget, not from
 // a simulation. (Public RPCs cap eth_call at about 50M gas, so a simulation of a big batch fails or lies.)
@@ -34,9 +42,15 @@ export function evalBudget(gates) {
   return EVAL_BASE_GAS + EVAL_GAS_PER_GATE * BigInt(gates);
 }
 
+/// The gas each case gets: the stored per-case gas when the contract has one (`caseGas`, BigInt), else the formula.
+export function caseBudget({ gates, caseGas }) {
+  return caseGas && caseGas > 0n ? caseGas : evalBudget(gates);
+}
+
 /// Gas limit for a checkPiece call that runs k cases. `pays` adds the payout, which re-reads every piece's netlist.
-export function batchGasLimit({ k, gates, netlistBytes, pays, allNetlistBytes = [] }) {
-  const budget = evalBudget(gates);
+/// `caseGas` is the delivery's stored per-case gas (pieceCaseGasOf); without it the formula evalBudget(gates).
+export function batchGasLimit({ k, gates, caseGas, netlistBytes, pays, allNetlistBytes = [] }) {
+  const budget = caseBudget({ gates, caseGas });
   const perCase = (budget * 64n + 62n) / 63n + GAS_RESERVE + PER_CASE_OVERHEAD;
   let g = TX_BASE + netlistGas(netlistBytes) + BigInt(k) * perCase;
   if (pays) g += PAY_BASE + allNetlistBytes.reduce((s, b) => s + netlistGas(b), 0n);
@@ -170,7 +184,15 @@ function readState(a) {
     const [p, id] = fields(call(a, 'pieceOf(uint256,uint256)(address,uint256,address,uint32,bytes32,uint32)', a.order, i));
     return { proc: p, id };
   });
-  return { proc, circuitId, netlistHash, gates: Number(gates), next: Number(next), total: 2 ** nIn, status: Number(o[8]), deadline: Number(o[3]), all };
+  return { proc, circuitId, netlistHash, gates: Number(gates), caseGas: readCaseGas(a), next: Number(next), total: 2 ** nIn, status: Number(o[8]), deadline: Number(o[3]), all };
+}
+
+/// pieceCaseGasOf(order, piece): the per-case gas fixed at delivery. null on a contract from before it (the call
+/// fails), and then the formula is used, which is what such a contract gives each case.
+function readCaseGas(a) {
+  const r = cast(['call', a.lathe, 'pieceCaseGasOf(uint256,uint256)(uint256)', String(a.order), String(a.piece), '--rpc-url', a.rpc]);
+  if (!r.ok) return null;
+  return BigInt(r.out.trim().split(/\s+/)[0]);
 }
 
 function netlistBytes(a, proc, id) {
@@ -219,6 +241,7 @@ function main() {
   const allNets = s.all.map((p) => netlistBytes(a, p.proc, p.id));
   const opts = {
     gates: s.gates,
+    caseGas: s.caseGas,
     netlistBytes: myNet,
     allNetlistBytes: allNets,
     // A batch that finishes the piece may also pay the order (never for a needs-top order: it pays at deliverTop).
@@ -228,14 +251,15 @@ function main() {
   const k = fitBatch(want, opts, ceiling);
   if (k === 0) {
     const one = batchGasLimit({ ...opts, k: 1, pays: opts.paysAt(1) });
-    die(`one case needs a gas limit of ${one}, above ${ceilingName} (budget ${evalBudget(s.gates)} per case): this piece cannot be checked on this chain`);
+    die(`one case needs a gas limit of ${one}, above ${ceilingName} (budget ${caseBudget(opts)} per case): this piece cannot be checked on this chain`);
   }
   if (k < want) console.log(`batch lowered from ${want} to ${k} so the gas limit stays under ${ceilingName}`);
 
   const remaining = s.total - s.next;
   const txs = Math.ceil(remaining / k);
   const fullLimit = batchGasLimit({ ...opts, k, pays: false });
-  console.log(`order ${a.order} piece ${a.piece}: ${s.next}/${s.total} cases, ${s.gates} gates, budget ${evalBudget(s.gates)} gas per case`);
+  const src = s.caseGas === null ? 'formula; this contract stores no per-case gas' : s.caseGas > evalBudget(s.gates) ? 'declared by the builder' : 'formula';
+  console.log(`order ${a.order} piece ${a.piece}: ${s.next}/${s.total} cases, ${s.gates} gates, budget ${caseBudget(opts)} gas per case (${src})`);
   console.log(`plan: ${txs} transaction(s) of up to ${k} cases, gas limit ${fullLimit} each (the last one more if it pays)`);
   console.log(`deadline ${new Date(s.deadline * 1000).toISOString()}; checks run until deadline + 1 day`);
   if (needsTop) console.log(TOP_NOTE);
