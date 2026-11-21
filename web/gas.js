@@ -139,3 +139,20 @@ export function payoutAfterFee(amount, feeBps) {
 export function feePercent(feeBps) {
   return formatUnitsPlain(BigInt(feeBps), 2);
 }
+
+// run / runStep (a free eth_call on a paid order): the contract re-checks the circuit (reads and hashes the
+// netlist), then needs the full per-case hold free before the circuit runs, or it reverts InsufficientGasForCase.
+export const RUN_OVERHEAD = 300_000n;
+
+/** Gas to ask for when calling run / runStep on a circuit of `gateCount` gates. */
+export function runGasLimit(c, gateCount) {
+  return RUN_OVERHEAD + NETLIST_GAS_PER_GATE * BigInt(gateCount) + perCaseHold(c, gateCount);
+}
+
+/**
+ * True when a run call fits under the public node's eth_call cap. When it does not, the page does not call:
+ * the node would cut the gas and the contract would refuse (InsufficientGasForCase), so there is no answer to show.
+ */
+export function runFitsSim(c, gateCount, cap = SIM_GAS_CAP) {
+  return runGasLimit(c, gateCount) <= cap;
+}

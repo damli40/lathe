@@ -2,13 +2,14 @@
 // - caps eth_call / eth_estimateGas at 50,000,000 gas, as rpc.xlayer.tech and testrpc.xlayer.tech do (measured);
 // - counts the most requests in flight at once;
 // - can answer chosen methods with HTTP 503 (st.fail = new Set([...])) to stand in for a node that is down;
-// - can delay every answer (st.delay, ms).
+// - can delay every answer (st.delay, ms);
+// - st.cap lowers the eth_call cap for one test (default RPC_CALL_GAS_CAP).
 import { createServer } from "node:http";
 
 export const RPC_CALL_GAS_CAP = 50_000_000n;
 
 export function startProxy(target, port) {
-  const st = { clamp: true, inflight: 0, max: 0, delay: 0, fail: new Set(), seen: [], callGas: [] };
+  const st = { clamp: true, cap: RPC_CALL_GAS_CAP, inflight: 0, max: 0, delay: 0, fail: new Set(), seen: [], callGas: [] };
   const srv = createServer(async (req, res) => {
     let body = "";
     for await (const ch of req) body += ch;
@@ -27,7 +28,7 @@ export function startProxy(target, port) {
         if (st.clamp && (m.method === "eth_call" || m.method === "eth_estimateGas") && m.params?.[0]) {
           const g = m.params[0].gas ? BigInt(m.params[0].gas) : null;
           st.callGas.push(g);
-          if (g === null || g > RPC_CALL_GAS_CAP) m.params[0].gas = "0x" + RPC_CALL_GAS_CAP.toString(16);
+          if (g === null || g > st.cap) m.params[0].gas = "0x" + st.cap.toString(16);
         }
       }
       if (st.delay) await new Promise((r) => setTimeout(r, st.delay));

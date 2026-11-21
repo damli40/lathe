@@ -58,6 +58,15 @@ Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mon
   adds two columns to the grid. `s` is the memory a case starts with (the case number's bit above the inputs);
   `s′` is the memory the circuit must leave, packed above the outputs in each answer (`table.js`, `TableLib.sol`).
   The contract checks these orders with the circuit's `step` function instead of `eval`.
+- Input names: optional, one per input and one for the memory bit, up to 32 bytes each, stored on chain as
+  `bytes32` (`labelsOf`). With no names the page uses the label-less `createOrder` / `createStatefulOrder`.
+- Receipt view, `?receipt=N`: needs no wallet. It shows what the contract wrote at payout (processor, circuit,
+  table fingerprint, block), checks the fingerprint against the stored table and `ruleOf` against the receipt,
+  and lets a visitor run the paid circuit (`run`, or `runStep` with memory) as a free `eth_call`. The call asks for
+  `RUN_OVERHEAD + netlist + one case's hold` gas (`gas.js`). If that is above the 48M the page keeps under the
+  public node's cap, the page says so and does not call. If a node gives the call less gas anyway, the contract
+  reverts `InsufficientGasForCase` and the page shows that as an error. It never shows an answer it did not get
+  in full.
 - Claim fees is left out on purpose: `claimFees()` sends fees to the fixed fee recipient, so it is no use to a visitor.
 - Explorer links: none. When checked on 2026-11-21, neither OKLink nor the OKX explorer resolved a known chain-1952
   transaction, so hashes are shown as copyable text. Set `explorerTx` in `config.js` once a format is confirmed.
@@ -96,6 +105,12 @@ SHOTS_DIR=/tmp/lathe-shots node web/test/shots.mjs
 #    honest toggle circuit 3 = Paid; circuit 4 (new memory wrong in case 3) = refusal naming x0=1 s=1, row 3
 #    highlighted, nothing sent; a memory-free circuit on a memory order = shape mismatch in the read-out
 node web/test/memory.mjs
+
+# 8. Receipts and input names on a local anvil, through the 50M-cap proxy: named XOR and toggle orders paid; with
+#    no wallet, ?receipt=N shows the receipt, checks the table fingerprint and ruleOf, uses the names as row
+#    headers, and runs run / runStep on chain; an unpaid order has no receipt; a 4,000-gate circuit is not run
+#    (and the contract refuses run at 50M gas); a run call cut to 150,000 gas shows an error, not an answer
+node web/test/receipt.mjs
 ```
 
 The browser tests turn off the page's CSP (`bypassCSP`) only so the testnet or mainnet entry can point at

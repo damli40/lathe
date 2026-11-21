@@ -43,6 +43,24 @@ contract LatheOrders is ReentrancyGuard {
         uint32 nextCase; // the next case check will run
     }
 
+    /// @notice What was paid for, written once at payout: which circuit, the hash of the table it matched, and
+    /// the block. Never changed afterwards. (Named PaidReceipt because Solidity forbids a struct and the Receipt
+    /// event sharing one name; the event name is the one in the ABI.)
+    struct PaidReceipt {
+        address processor;
+        uint256 circuitId;
+        bytes32 tableHash; // keccak256(tableOf[orderId])
+        uint64 blockNumber;
+    }
+
+    /// @dev Create arguments grouped to keep the stack small.
+    struct Terms {
+        uint96 amount;
+        uint64 deadline;
+        address builder;
+        uint32 maxGates;
+    }
+
     uint256 public constant GRACE = 1 days;
     uint16 public constant MAX_FEE_BPS = 500;
     uint256 public constant MAX_CASE_BITS = 6; // nIn + nState <= 6, so at most 64 cases
@@ -76,6 +94,9 @@ contract LatheOrders is ReentrancyGuard {
     mapping(uint256 => Order) public orders;
     mapping(uint256 => bytes) public tableOf;
     mapping(uint256 => Delivery) public deliveries;
+    mapping(uint256 => PaidReceipt) public receipts;
+    /// @dev Optional names for the inputs (then the memory bits), one bytes32 each; empty when none were given.
+    mapping(uint256 => bytes32[]) internal _labels;
 
     event OrderCreated(uint256 indexed orderId, address indexed buyer, uint96 amount, uint64 deadline);
     event Delivered(uint256 indexed orderId, address indexed builder, address processor, uint256 circuitId);
@@ -83,6 +104,7 @@ contract LatheOrders is ReentrancyGuard {
     event Paid(uint256 indexed orderId, address indexed builder, address processor, uint256 circuitId);
     event Refunded(uint256 indexed orderId, address indexed buyer, uint96 amount);
     event FeesClaimed(address indexed to, uint256 amount);
+    event Receipt(uint256 indexed orderId, address processor, uint256 circuitId, bytes32 tableHash);
 
     error FeeTooHigh();
     error ZeroAddress();
@@ -110,6 +132,10 @@ contract LatheOrders is ReentrancyGuard {
     error NotBuyer();
     error RefundNotAllowed();
     error UnsupportedStateBits();
+    error NotPaid();
+    error WrongLabelCount();
+    error BadInputs();
+    error ShortOutput();
 
     constructor(address factory_, address usdt_, address feeRecipient_, uint16 feeBps_) {
         if (feeBps_ > MAX_FEE_BPS) revert FeeTooHigh();
@@ -132,7 +158,24 @@ contract LatheOrders is ReentrancyGuard {
         address builder,
         uint32 maxGates
     ) external nonReentrant returns (uint256 orderId) {
-        return _create(nIn, nOut, 0, table, amount, deadline, builder, maxGates);
+        orderId = _create(nIn, nOut, 0, table, Terms(amount, deadline, builder, maxGates));
+        _pull(amount);
+    }
+
+    /// @notice createOrder with names for the inputs: `labels` has nIn entries (input x0 first), or none.
+    function createOrder(
+        uint8 nIn,
+        uint8 nOut,
+        bytes calldata table,
+        uint96 amount,
+        uint64 deadline,
+        address builder,
+        uint32 maxGates,
+        bytes32[] calldata labels
+    ) external nonReentrant returns (uint256 orderId) {
+        orderId = _create(nIn, nOut, 0, table, Terms(amount, deadline, builder, maxGates));
+        _setLabels(orderId, labels, nIn);
+        _pull(amount);
     }
 
     /// @notice Lock `amount` for a memory circuit: `nIn` inputs, `nOut` outputs and `nState` memory bits, checked
@@ -152,10 +195,13 @@ contract LatheOrders is ReentrancyGuard {
         uint32 maxGates
     ) external nonReentrant returns (uint256 orderId) {
         if (nState != 1) revert UnsupportedStateBits();
-        return _create(nIn, nOut, nState, table, amount, deadline, builder, maxGates);
+        orderId = _create(nIn, nOut, nState, table, Terms(amount, deadline, builder, maxGates));
+        _pull(amount);
     }
 
-    function _create(
+    /// @notice createStatefulOrder with names: `labels` has nIn + nState entries (inputs x0.. first, then the
+    /// memory bit), or none.
+    function createStatefulOrder(
         uint8 nIn,
         uint8 nOut,
         uint8 nState,
@@ -163,7 +209,44 @@ contract LatheOrders is ReentrancyGuard {
         uint96 amount,
         uint64 deadline,
         address builder,
-        uint32 maxGates
+        uint32 maxGates,
+        bytes32[] calldata labels
+    ) external nonReentrant returns (uint256 orderId) {
+        if (nState != 1) revert UnsupportedStateBits();
+        Terms memory t = Terms(amount, deadline, builder, maxGates);
+        orderId = _createLabelled(nIn, nOut, nState, table, t, labels);
+    }
+
+    /// @notice The input names given at creation (empty when none were given).
+    function labelsOf(uint256 orderId) external view returns (bytes32[] memory) {
+        return _labels[orderId];
+    }
+
+    function _createLabelled(
+        uint8 nIn,
+        uint8 nOut,
+        uint8 nState,
+        bytes calldata table,
+        Terms memory t,
+        bytes32[] calldata labels
+    ) internal returns (uint256 orderId) {
+        orderId = _create(nIn, nOut, nState, table, t);
+        _setLabels(orderId, labels, uint256(nIn) + nState);
+        _pull(t.amount);
+    }
+
+    function _setLabels(uint256 orderId, bytes32[] calldata labels, uint256 n) internal {
+        if (labels.length == 0) return;
+        if (labels.length != n) revert WrongLabelCount();
+        _labels[orderId] = labels;
+    }
+
+    function _create(
+        uint8 nIn,
+        uint8 nOut,
+        uint8 nState,
+        bytes calldata table,
+        Terms memory t
     ) internal returns (uint256 orderId) {
         if (uint256(nIn) + nState > MAX_CASE_BITS) revert TooManyCases();
         if (nOut == 0 || uint256(nOut) + nState > MAX_ANSWER_BITS) revert TooManyOutputs();
@@ -174,26 +257,29 @@ contract LatheOrders is ReentrancyGuard {
         if (tableBits % 8 != 0 && uint8(table[table.length - 1]) >> (tableBits % 8) != 0) {
             revert TablePaddingNotZero();
         }
-        if (deadline <= block.timestamp) revert DeadlinePassed();
-        if (amount == 0) revert ZeroAmount();
-        if (builder == address(0)) revert BuilderRequired();
+        if (t.deadline <= block.timestamp) revert DeadlinePassed();
+        if (t.amount == 0) revert ZeroAmount();
+        if (t.builder == address(0)) revert BuilderRequired();
 
         orderId = nextOrderId++;
         orders[orderId] = Order({
             buyer: msg.sender,
-            builder: builder,
-            amount: amount,
-            deadline: deadline,
-            maxGates: maxGates,
+            builder: t.builder,
+            amount: t.amount,
+            deadline: t.deadline,
+            maxGates: t.maxGates,
             nIn: nIn,
             nOut: nOut,
             nState: nState,
             status: Status.Open
         });
         tableOf[orderId] = table;
-        emit OrderCreated(orderId, msg.sender, amount, deadline);
+        emit OrderCreated(orderId, msg.sender, t.amount, t.deadline);
+    }
 
-        // Pull the money last, and check the full amount arrived (guards against a fee-on-transfer upgrade).
+    /// @dev Every create function calls this last, after all state is written: pull the money and check the full
+    /// amount arrived (guards against a fee-on-transfer upgrade).
+    function _pull(uint96 amount) internal {
         uint256 before = usdt.balanceOf(address(this));
         usdt.safeTransferFrom(msg.sender, address(this), amount);
         if (usdt.balanceOf(address(this)) - before != amount) revert ReceivedLessThanAmount();
@@ -312,8 +398,86 @@ contract LatheOrders is ReentrancyGuard {
         address payee = d.builder;
         uint256 fee = uint256(o.amount) * feeBps / 10_000;
         feesOwed += fee;
+        _writeReceipt(orderId, d);
         emit Paid(orderId, payee, d.processor, d.circuitId);
         usdt.safeTransfer(payee, o.amount - fee);
+    }
+
+    /// @dev Written once, at payout, before the transfer.
+    function _writeReceipt(uint256 orderId, Delivery storage d) internal {
+        PaidReceipt storage r = receipts[orderId];
+        r.processor = d.processor;
+        r.circuitId = d.circuitId;
+        r.tableHash = keccak256(tableOf[orderId]);
+        r.blockNumber = uint64(block.number);
+        emit Receipt(orderId, r.processor, r.circuitId, r.tableHash);
+    }
+
+    /// @notice The rule a paid order bought: the circuit that passed every case. Reverts NotPaid otherwise.
+    function ruleOf(uint256 orderId) external view returns (address processor, uint256 circuitId) {
+        if (orders[orderId].status != Status.Paid) revert NotPaid();
+        PaidReceipt storage r = receipts[orderId];
+        return (r.processor, r.circuitId);
+    }
+
+    /// @notice Run the paid circuit of an order without memory on `inputs` (ceil(nIn/8) bytes, LSB first, bits
+    /// above nIn zero). Returns the outputs as ceil(nOut/8) bytes with the padding bits above nOut zeroed, which
+    /// is exactly what check compared. The same guards as check apply: the order must be Paid, the circuit must be
+    /// unchanged since delivery (else CircuitChanged), and eval gets exactly evalBudget(gateCount) gas, so a caller
+    /// with too little gas (for example an RPC that caps eth_call) gets InsufficientGasForCase, never an answer.
+    /// Any revert inside eval reverts this call.
+    function run(uint256 orderId, bytes calldata inputs) external view returns (bytes memory outputs) {
+        Order storage o = _paidOrder(orderId);
+        if (o.nState != 0 || !_fits(inputs, o.nIn)) revert BadInputs();
+        Delivery storage d = deliveries[orderId];
+        uint256 budget = _paidBudget(o, d);
+        return _low(IProcessor(d.processor).eval{gas: budget}(d.circuitId, inputs), o.nOut);
+    }
+
+    /// @notice runStep for an order with memory: one tick of the paid circuit from memory `state` (ceil(nState/8)
+    /// bytes) on `inputs`. Returns (newState, outputs), the same order as TapeOut's step, each with padding zeroed.
+    /// Same guards as run.
+    function runStep(uint256 orderId, bytes calldata state, bytes calldata inputs)
+        external
+        view
+        returns (bytes memory newState, bytes memory outputs)
+    {
+        Order storage o = _paidOrder(orderId);
+        if (o.nState == 0 || !_fits(inputs, o.nIn) || !_fits(state, o.nState)) revert BadInputs();
+        Delivery storage d = deliveries[orderId];
+        uint256 budget = _paidBudget(o, d);
+        (newState, outputs) = IProcessor(d.processor).step{gas: budget}(d.circuitId, state, inputs);
+        return (_low(newState, o.nState), _low(outputs, o.nOut));
+    }
+
+    function _paidOrder(uint256 orderId) internal view returns (Order storage o) {
+        o = orders[orderId];
+        if (o.status != Status.Paid) revert NotPaid();
+    }
+
+    /// @dev The circuit must be the one delivered, and the caller must leave room for its full budget.
+    function _paidBudget(Order storage o, Delivery storage d) internal view returns (uint256 budget) {
+        _requireUnchanged(o, d);
+        budget = evalBudget(d.gateCount);
+        _requireCaseGas(budget);
+    }
+
+    /// @dev Exactly ceil(nBits/8) bytes and no bit set above nBits.
+    function _fits(bytes calldata b, uint256 nBits) internal pure returns (bool) {
+        if (b.length != (nBits + 7) / 8) return false;
+        return nBits % 8 == 0 || uint8(b[b.length - 1]) >> (nBits % 8) == 0;
+    }
+
+    /// @dev The low nBits of b, packed again so the padding is zero. Too few bytes is an error, never zeros.
+    function _low(bytes memory b, uint256 nBits) internal pure returns (bytes memory) {
+        if (b.length < (nBits + 7) / 8) revert ShortOutput();
+        return BitLib.pack(BitLib.lowBits(b, nBits), nBits);
+    }
+
+    /// @dev A call can pass on at most 63/64 of the gas left (EIP-150); keep enough so the circuit gets all of
+    /// `budget`. Shared by check, deliver's inline check, run and runStep.
+    function _requireCaseGas(uint256 budget) internal view {
+        if (gasleft() < budget * 64 / 63 + GAS_RESERVE) revert InsufficientGasForCase();
     }
 
     /// @notice The gas each case's eval gets for a circuit of `gateCount` gates (REF'd gates included).
@@ -367,8 +531,7 @@ contract LatheOrders is ReentrancyGuard {
     {
         bytes memory inputs = BitLib.pack(c, o.nIn); // pack keeps only the low nIn bits
         bytes memory state = BitLib.pack(c >> o.nIn, o.nState); // empty when there is no memory
-        // A call can pass on at most 63/64 of the gas left (EIP-150); keep enough so the call gets all of `budget`.
-        if (gasleft() < budget * 64 / 63 + GAS_RESERVE) revert InsufficientGasForCase();
+        _requireCaseGas(budget);
         if (state.length == 0) return _evalAnswer(p, id, inputs, o.nOut, budget);
         return _stepAnswer(p, id, state, inputs, o, budget);
     }

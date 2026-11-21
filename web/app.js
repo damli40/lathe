@@ -48,7 +48,7 @@ const state = {
   account: null,
   walletChainId: null,
   walletMsg: null,
-  form: { nIn: 2, nOut: 1, nState: 0, answers: T.presetAnswers("xor", 2), maxGatesTouched: false, approved: false, allowance: null, balance: null, steps: {}, result: null },
+  form: { nIn: 2, nOut: 1, nState: 0, labels: [], stateLabel: "", answers: T.presetAnswers("xor", 2), maxGatesTouched: false, approved: false, allowance: null, balance: null, steps: {}, result: null },
   view: null, // { id, loading, data, error, inputs, preview, msgs, failedCase, busy }
   tab: "create",
 };
@@ -62,7 +62,7 @@ function pickLang() {
 }
 
 function pickNet() {
-  const r = pickNetKey(NETS, { url: params.get("net"), stored: store.get("lathe.net"), hasOrder: !!params.get("order") });
+  const r = pickNetKey(NETS, { url: params.get("net"), stored: store.get("lathe.net"), hasOrder: !!params.get("order") || !!params.get("receipt") });
   if (r.resetStored) store.set("lathe.net", null);
   return r.key;
 }
@@ -136,6 +136,27 @@ function inputsLabel(c, nIn, nState = 0) {
   for (let k = 0; k < nState; k++) out.push(`s=${T.stateBit(c, nIn, k)}`);
   return out.join(" ");
 }
+// ---------------------------------------------------------------- input names (labels)
+// Stored on chain as one bytes32 per input, then one for the memory bit; empty means "no name, show x0".
+const utf8 = new TextEncoder();
+function decodeLabels(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((h) => {
+    if (typeof h !== "string" || /^0x0{64}$/i.test(h)) return "";
+    try {
+      return state.viem.hexToString(h, { size: 32 });
+    } catch {
+      return "";
+    }
+  });
+}
+// Header text for case bit k (inputs x0.., then the memory bit s) with an optional name.
+function colHead(labels, k, nIn) {
+  const code = k < nIn ? `x${k}` : "s";
+  const name = labels?.[k];
+  return name ? `${name} (${code})` : code;
+}
+
 function sameAddr(a, b) {
   return !!a && !!b && a.toLowerCase() === b.toLowerCase();
 }
@@ -640,6 +661,7 @@ function explain(err, ctx = {}) {
       return { name, caseIndex: c, text: txt("tool.errors.WrongAnswer", { c, inputs: inputsLabel(c, ctx.nIn ?? 0, ctx.nState ?? 0) }) };
     }
     if (name === "InsufficientGasForCase" && ctx.action === "deliver") return { name, text: txt("tool.errors.InsufficientGasForCaseDeliver") };
+    if (name === "InsufficientGasForCase" && ctx.action === "run") return { name, text: txt("tool.errors.InsufficientGasForCaseRun") };
     return { name, text: txt("tool.errors." + name) };
   }
   const msg = (err?.shortMessage || err?.message || String(err)).split("\n")[0].slice(0, 240);
@@ -785,6 +807,7 @@ function renderCreate() {
     mem.appendChild(el("button", { type: "button", "aria-pressed": String(k === f.nState), "aria-describedby": "mem-help", "data-nstate": k, text: txt(k ? "tool.create.memoryOne" : "tool.create.memoryNone"), on: { click: () => setNState(k) } }));
   }
   $("#table-help-state").hidden = !f.nState;
+  renderLabelInputs();
   const maxOut = maxOutputs();
   $("#f-nout").max = String(maxOut);
   setText("#nout-help", txt("tool.create.outputsHelp", { max: maxOut }));
@@ -807,6 +830,44 @@ function renderCreate() {
   renderTable();
   validateAll(false);
   renderCreateSend();
+}
+
+// One name box per input, then one for the memory bit. Names are kept per position while the shape changes.
+function renderLabelInputs() {
+  const f = state.form;
+  const row = clear($("#labels-row"));
+  const n = f.nIn + f.nState;
+  for (let k = 0; k < n; k++) {
+    const code = k < f.nIn ? `x${k}` : "s";
+    const input = el("input", { class: "input", id: "f-label-" + k, type: "text", autocomplete: "off", spellcheck: "false", "aria-label": txt("tool.create.labelFor", { col: code }), "aria-describedby": "labels-help labels-err", value: k < f.nIn ? f.labels[k] || "" : f.stateLabel });
+    input.addEventListener("input", () => {
+      if (k < f.nIn) f.labels[k] = input.value;
+      else f.stateLabel = input.value;
+      renderTable();
+      validateAll(true);
+      renderCreateSend();
+    });
+    row.appendChild(el("label", { class: "label-cell", for: "f-label-" + k }, el("span", { text: code }), input));
+  }
+}
+
+// The names as the create call takes them: [] when every box is empty, else nIn + nState bytes32 values.
+function readLabels() {
+  const f = state.form;
+  const names = formLabels();
+  if (names.every((x) => !x)) return { value: [] };
+  for (const x of names) {
+    const n = utf8.encode(x).length;
+    if (n > 32) return { error: "label", n };
+  }
+  return { value: names.map((x) => (x ? state.viem.stringToHex(x, { size: 32 }) : "0x" + "0".repeat(64))) };
+}
+function formLabels() {
+  const f = state.form;
+  const out = [];
+  for (let k = 0; k < f.nIn; k++) out.push((f.labels[k] || "").trim());
+  if (f.nState) out.push(f.stateLabel.trim());
+  return out;
 }
 
 function localInputValue(ms) {
@@ -910,7 +971,7 @@ function renderMaxGatesHelp() {
 function renderTable() {
   const f = state.form;
   const wrap = clear($("#tt-wrap"));
-  wrap.appendChild(buildTable(f.nIn, f.nOut, f.answers, { editable: true, nState: f.nState }));
+  wrap.appendChild(buildTable(f.nIn, f.nOut, f.answers, { editable: true, nState: f.nState, labels: formLabels() }));
   setText("#table-hex", T.toHex(T.encodeTable(f.nIn, f.nOut, f.answers, f.nState)));
 }
 
@@ -946,13 +1007,13 @@ function gridKeys(table) {
 
 // Columns: case number, inputs x0.., the memory the case starts with (s), outputs y0.., the new memory (s′).
 // Answer bit k < nOut is output y_k; bit nOut is the new memory (TableLib: outputs low, new memory above).
-function buildTable(nIn, nOut, answers, { editable, failedCase = null, nState = 0 }) {
+function buildTable(nIn, nOut, answers, { editable, failedCase = null, nState = 0, labels = null }) {
   const w = nOut + nState;
   const cases = T.caseCount(nIn, nState);
   const fc = state.form.focusCell && state.form.focusCell.c < cases && state.form.focusCell.k < w ? state.form.focusCell : { c: 0, k: 0 };
   const head = el("tr", {}, el("th", { class: "case", scope: "col", text: txt("tool.create.colCase") }));
-  for (let k = 0; k < nIn; k++) head.appendChild(el("th", { scope: "col", class: k === 0 ? "sep" : null, text: `x${k}` }));
-  for (let k = 0; k < nState; k++) head.appendChild(el("th", { scope: "col", class: k === 0 && nIn === 0 ? "sep" : null, text: "s" }));
+  for (let k = 0; k < nIn; k++) head.appendChild(el("th", { scope: "col", class: k === 0 ? "sep" : null, text: colHead(labels, k, nIn) }));
+  for (let k = 0; k < nState; k++) head.appendChild(el("th", { scope: "col", class: k === 0 && nIn === 0 ? "sep" : null, text: colHead(labels, nIn + k, nIn) }));
   for (let k = 0; k < nOut; k++) head.appendChild(el("th", { scope: "col", class: k === 0 ? "sep" : null, text: `y${k}` }));
   for (let k = 0; k < nState; k++) head.appendChild(el("th", { scope: "col", class: "sep", text: "s′" }));
   if (failedCase !== null) head.appendChild(el("th", { scope: "col" }));
@@ -1039,6 +1100,7 @@ function validateAll(show = true) {
   const b = readBuilder();
   const g = readMaxGates();
   const o = readOutputs();
+  const lb = readLabels();
   const dh = $("#f-deadline").value ? new Date($("#f-deadline").value) : null;
   // S1: what the builder gets after the contract's fee. Nothing extra with a 0 fee.
   setText("#payout-line", i.feeBps > 0 && a.value !== undefined ? txt("tool.payout", { net: fmtAmount(G.payoutAfterFee(a.value, i.feeBps)), symbol: i.symbol, pct: G.feePercent(i.feeBps) }) : "");
@@ -1052,9 +1114,10 @@ function validateAll(show = true) {
     showErr("builder", b.error ? txt("tool.create.errors.builder." + b.error) : "");
     showErr("maxgates", g.error ? txt("tool.create.errors.maxGates") : "");
     showErr("nout", o.error ? txt("tool.create.errors.outputs", { max: maxOutputs() }) : "");
+    setText("#labels-err", lb.error ? txt("tool.create.errors.label", { n: lb.n }) : "");
   }
-  const ok = !a.error && !d.error && !b.error && !g.error && !o.error && o.value === state.form.nOut;
-  return { ok, amount: a.value, deadline: d.value, builder: b.value, maxGates: g.value };
+  const ok = !a.error && !d.error && !b.error && !g.error && !o.error && !lb.error && o.value === state.form.nOut;
+  return { ok, amount: a.value, deadline: d.value, builder: b.value, maxGates: g.value, labels: lb.value || [] };
 }
 
 const touched = new Set();
@@ -1309,9 +1372,11 @@ $("#create-btn").addEventListener("click", async () => {
   const key = state.netKey;
   const table = T.toHex(T.encodeTable(f.nIn, f.nOut, f.answers, f.nState));
   // No memory: createOrder. One memory bit: createStatefulOrder, checked with the circuit's step function.
+  // With input names, the overload that takes them (the label-less overloads stay for orders without names).
   const call = f.nState
     ? { functionName: "createStatefulOrder", args: [f.nIn, f.nOut, f.nState, table, v.amount, v.deadline, v.builder, v.maxGates] }
     : { functionName: "createOrder", args: [f.nIn, f.nOut, table, v.amount, v.deadline, v.builder, v.maxGates] };
+  if (v.labels.length) call.args.push(v.labels);
   f.result = null;
   f.steps = { ...f.steps, busy: true, createMsg: null, approveMsg: null };
   renderCreateSend();
@@ -1375,12 +1440,12 @@ $("#lookup-form").addEventListener("submit", (e) => {
   openOrder(BigInt(v));
 });
 
-function openOrder(id) {
+function openOrder(id, mode = "order") {
   selectTab("lookup");
   $("#f-lookup").value = String(id);
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   $("#order-lookup").scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
-  loadOrder(BigInt(id));
+  loadOrder(BigInt(id), { mode });
 }
 
 function renderOrderEmpty() {
@@ -1398,9 +1463,13 @@ async function loadOrder(id, keep = {}) {
     id, loading: true, data: prev?.data || null, error: null, inputs,
     preview: keep.preview ?? null, msgs: keep.msgs || {}, failedCase: keep.failedCase ?? null, busy: false,
     lastAction: keep.lastAction ?? null,
+    mode: keep.mode ?? prev?.mode ?? "order", // "order" or "receipt" (?receipt=N)
+    tryBits: prev?.tryBits || null, tryResult: null,
   };
   const p = new URLSearchParams(location.search);
-  p.set("order", String(id));
+  const urlKey = state.view.mode === "receipt" ? "receipt" : "order";
+  p.delete(urlKey === "receipt" ? "order" : "receipt");
+  p.set(urlKey, String(id));
   if (state.netKey !== DEFAULT_NETWORK) p.set("net", state.netKey);
   else p.delete("net");
   history.replaceState(null, "", location.pathname + "?" + p.toString());
@@ -1426,6 +1495,22 @@ async function loadOrder(id, keep = {}) {
         now: block.timestamp,
         nowAt: performance.now(),
       };
+      // Names are optional and a contract from before V2 has no labelsOf: a failed read shows no names.
+      try {
+        data.labels = decodeLabels(await read(L, A, "labelsOf", [id]));
+      } catch {
+        data.labels = [];
+      }
+      if (state.view.mode === "receipt" && data.order.status === 2) {
+        const r = await read(L, A, "receipts", [id]);
+        data.receipt = { processor: r[0], circuitId: r[1], tableHash: r[2], blockNumber: r[3] };
+        try {
+          const rule = await read(L, A, "ruleOf", [id]);
+          data.rule = { processor: rule[0], circuitId: rule[1] };
+        } catch (e) {
+          data.rule = { error: explain(e, { read: true }).text };
+        }
+      }
     }
     if (seq !== orderSeq) return;
     state.view.data = data;
@@ -1488,6 +1573,7 @@ function renderOrder() {
   const v = state.view;
   if (!v) return renderOrderEmpty();
   box.removeAttribute("data-status");
+  box.removeAttribute("data-view");
   if (v.loading && !v.data) {
     box.setAttribute("aria-busy", "true");
     box.append(
@@ -1519,12 +1605,14 @@ function renderOrder() {
   const i = info();
   const cases = T.caseCount(o.nIn, o.nState);
   box.setAttribute("data-status", String(o.status));
+  if (v.mode === "receipt") return renderReceipt(box, v, data);
   const you = (a) => (sameAddr(a, state.account) ? " (" + txt("tool.order.you") + ")" : "");
 
   const head = el("div", { class: "ov-head" },
     el("h3", { text: txt("tool.order.title", { id: String(v.id) }) }),
     el("span", { class: "badge s-" + o.status, id: "order-status", text: txt("tool.order.status." + o.status) }),
     el("button", { type: "button", class: "btn btn-quiet btn-sm", text: txt("tool.order.refresh"), on: { click: () => loadOrder(v.id) } }),
+    o.status === 2 ? el("button", { type: "button", class: "btn btn-ghost btn-sm", id: "receipt-btn", text: txt("tool.receipt.view"), on: { click: () => openOrder(v.id, "receipt") } }) : null,
     el("p", { class: "help", text: txt("tool.order.statusHelp." + o.status) }),
     v.lastAction ? el("p", { class: "msg " + (v.lastAction.err ? "is-err" : "is-ok"), role: "status", id: "last-action", text: txt(v.lastAction.key, v.lastAction.vars) }) : null);
 
@@ -1559,7 +1647,7 @@ function renderOrder() {
   }
   const tbox = el("div", { class: "create-table" }, el("h4", { class: "label-like", text: txt("tool.order.tableHeading") }));
   if (answers) {
-    const scroller = el("div", { class: "tt-scroll" }, buildTable(o.nIn, o.nOut, answers, { editable: false, failedCase: v.failedCase, nState: o.nState }));
+    const scroller = el("div", { class: "tt-scroll" }, buildTable(o.nIn, o.nOut, answers, { editable: false, failedCase: v.failedCase, nState: o.nState, labels: data.labels }));
     tbox.append(scroller);
     tbox.append(el("p", { class: "help bytes-line" }, el("span", { text: txt("tool.create.tableBytes") }), " ", el("code", { class: "mono", text: data.table })));
   }
@@ -1884,6 +1972,129 @@ async function doCheck(o, d, maxN) {
   }
 }
 
+// ---------------------------------------------------------------- receipt view (?receipt=N)
+// No wallet needed: everything here is a read. The table fingerprint and ruleOf are checked against what is shown,
+// and a run answer is compared with the table, so a mismatch is said out loud instead of shown as fact.
+function renderReceipt(box, v, data) {
+  const o = data.order;
+  const i = info();
+  box.setAttribute("data-view", "receipt");
+  const head = el("div", { class: "ov-head" },
+    el("h3", { text: txt("tool.receipt.title", { id: String(v.id) }) }),
+    el("span", { class: "badge s-" + o.status, id: "order-status", text: txt("tool.order.status." + o.status) }),
+    el("button", { type: "button", class: "btn btn-quiet btn-sm", text: txt("tool.order.refresh"), on: { click: () => loadOrder(v.id) } }),
+    el("button", { type: "button", class: "btn btn-ghost btn-sm", id: "open-order-btn", text: txt("tool.receipt.openOrder", { id: String(v.id) }), on: { click: () => openOrder(v.id, "order") } }));
+  if (o.status !== 2 || !data.receipt) {
+    box.append(el("div", { class: "ov" }, head, el("div", { class: "ov-main" }, el("p", { class: "msg", id: "receipt-none", text: txt("tool.receipt.notPaid", { id: String(v.id) }) }))));
+    return;
+  }
+  const r = data.receipt;
+  head.append(el("p", { class: "help", text: txt("tool.receipt.help") }));
+  const hashOk = state.viem.keccak256(data.table).toLowerCase() === String(r.tableHash).toLowerCase();
+  const rule = data.rule || {};
+  const ruleOk = !rule.error && sameAddr(rule.processor, r.processor) && rule.circuitId === r.circuitId;
+  const facts = el("dl", { class: "facts", id: "receipt-facts" },
+    fact("tool.receipt.processor", el("span", { class: "mono", text: r.processor }), true),
+    fact("tool.receipt.circuitId", el("span", { class: "mono", text: r.circuitId.toString() })),
+    fact("tool.receipt.block", el("span", { class: "mono", text: fmtInt(r.blockNumber) })),
+    fact("tool.receipt.tableHash", el("span", {}, el("span", { class: "mono", text: r.tableHash }),
+      el("span", { class: "sub" + (hashOk ? "" : " bad"), id: "receipt-hash", text: txt(hashOk ? "tool.receipt.hashOk" : "tool.receipt.hashBad") })), true),
+    fact("tool.receipt.ruleOf", el("span", { class: ruleOk ? "" : "bad", id: "receipt-rule", text: rule.error || txt(ruleOk ? "tool.receipt.ruleOk" : "tool.receipt.ruleBad", { id: String(v.id) }) }), true),
+    fact("tool.order.shape", el("span", { text: txt(o.nState ? "tool.order.shapeValState" : "tool.order.shapeVal", { nIn: o.nIn, nOut: o.nOut, cases: T.caseCount(o.nIn, o.nState) }) })));
+  let answers = null;
+  try {
+    answers = T.decodeTable(o.nIn, o.nOut, state.viem.hexToBytes(data.table), o.nState);
+  } catch {
+    answers = null;
+  }
+  const tbox = el("div", { class: "create-table" }, el("h4", { class: "label-like", text: txt("tool.order.tableHeading") }));
+  if (answers) tbox.append(el("div", { class: "tt-scroll" }, buildTable(o.nIn, o.nOut, answers, { editable: false, nState: o.nState, labels: data.labels })));
+  const side = el("div", { class: "ov-side" }, tryBox(o, data.delivery, answers, data.labels, i));
+  box.append(el("div", { class: "ov" }, head, el("div", { class: "ov-main" }, facts, tbox), side));
+}
+
+// One row per input (its name as the row header), then the memory bit; each value is a 0/1 switch.
+function tryBox(o, d, answers, labels, i) {
+  const v = state.view;
+  const n = o.nIn + o.nState;
+  if (!v.tryBits || v.tryBits.length !== n) v.tryBits = new Array(n).fill(0);
+  const box = el("div", { class: "box", id: "try-box" }, el("h4", { text: txt("tool.receipt.tryHeading") }), el("p", { class: "help", text: txt("tool.receipt.tryHelp") }));
+  const body = el("tbody");
+  for (let k = 0; k < n; k++) {
+    const name = k < o.nIn ? colHead(labels, k, o.nIn) : labels?.[k] ? colHead(labels, k, o.nIn) : txt("tool.receipt.memoryRow");
+    const bit = v.tryBits[k];
+    const b = el("button", { type: "button", class: "bit", "data-k": k, "aria-pressed": String(!!bit), "aria-label": txt("tool.receipt.cellLabel", { name, v: bit }), text: String(bit) });
+    b.addEventListener("click", () => {
+      v.tryBits[k] ^= 1;
+      v.tryResult = null;
+      renderOrder();
+    });
+    body.appendChild(el("tr", {}, el("th", { scope: "row", text: name }), el("td", {}, b)));
+  }
+  box.append(el("table", { class: "try-table" },
+    el("thead", {}, el("tr", {}, el("th", { scope: "col", text: txt("tool.receipt.colInput") }), el("th", { scope: "col", text: txt("tool.receipt.colValue") }))), body));
+  const fits = G.runFitsSim(i, d.gateCount);
+  const btn = el("button", { type: "button", class: "btn btn-primary", id: "run-btn", text: txt(v.busy === "run" ? "tool.receipt.running" : "tool.receipt.runBtn"), disabled: !fits || !!v.busy });
+  btn.addEventListener("click", () => doRun(o, d, answers));
+  box.append(btn);
+  if (!fits) box.append(el("p", { class: "msg is-err", id: "run-toobig", text: txt("tool.receipt.tooBig") }));
+  const res = v.tryResult;
+  if (res) {
+    box.append(el("p", { class: "msg " + (res.err ? "is-err" : "is-ok"), role: res.err ? "alert" : "status", id: "run-result", text: res.text }));
+    if (res.check) box.append(el("p", { class: "msg " + (res.check.ok ? "is-ok" : "is-err"), id: "run-check", text: res.check.text }));
+  }
+  return box;
+}
+
+// run / runStep as a free eth_call with an explicit gas limit under the public node's cap. The contract refuses
+// (InsufficientGasForCase) rather than answer with less gas than the circuit's budget, and the page shows only
+// bits it got back in full, so a cut-short call becomes an error, never an answer.
+async function doRun(o, d, answers) {
+  const v = state.view;
+  const i = info();
+  if (!G.runFitsSim(i, d.gateCount)) return;
+  const bits = v.tryBits.slice();
+  let x = 0;
+  for (let k = 0; k < o.nIn; k++) x |= bits[k] << k;
+  const s = o.nState ? bits[o.nIn] : 0;
+  const inputs = T.toHex(T.pack(x, o.nIn));
+  const stateHex = T.toHex(T.pack(s, o.nState));
+  v.busy = "run";
+  v.tryResult = null;
+  renderOrder();
+  const id = v.id;
+  const key = state.netKey;
+  try {
+    const gas = G.runGasLimit(i, d.gateCount);
+    const L = net().lathe;
+    const r = o.nState
+      ? await state.pub.readContract({ address: L, abi: state.abi, functionName: "runStep", args: [id, stateHex, inputs], gas })
+      : await state.pub.readContract({ address: L, abi: state.abi, functionName: "run", args: [id, inputs], gas });
+    if (state.view !== v || state.netKey !== key) return;
+    const outHex = o.nState ? r[1] : r;
+    const outBytes = state.viem.hexToBytes(outHex);
+    const nsBytes = o.nState ? state.viem.hexToBytes(r[0]) : new Uint8Array(0);
+    if (outBytes.length !== Math.ceil(o.nOut / 8) || nsBytes.length !== Math.ceil(o.nState / 8)) throw new Error("short answer");
+    const out = T.readBits(outBytes, 0, o.nOut);
+    const ns = T.readBits(nsBytes, 0, o.nState);
+    const outText = Array.from({ length: o.nOut }, (_, k) => `y${k}=${(out >> k) & 1}`).join(" ");
+    const c = x | (s << o.nIn);
+    const got = out | (ns << o.nOut);
+    const res = { text: o.nState ? txt("tool.receipt.resultState", { out: outText, s: ns }) : txt("tool.receipt.result", { out: outText }) };
+    if (answers) {
+      const exp = answers[c];
+      const expText = Array.from({ length: o.nOut }, (_, k) => `y${k}=${(exp >> k) & 1}`).join(" ") + (o.nState ? ` s′=${(exp >> o.nOut) & 1}` : "");
+      res.check = exp === got ? { ok: true, text: txt("tool.receipt.match", { c }) } : { ok: false, text: txt("tool.receipt.mismatch", { c, exp: expText }) };
+    }
+    v.tryResult = res;
+  } catch (e) {
+    if (state.view !== v || state.netKey !== key) return;
+    v.tryResult = { err: true, text: explain(e, { read: true, action: "run" }).text };
+  }
+  v.busy = false;
+  renderOrder();
+}
+
 function refundBox(o, now) {
   const v = state.view;
   const i = info();
@@ -1942,11 +2153,12 @@ async function doRefund(o) {
 // ---------------------------------------------------------------- start
 applyStrings();
 mountFig();
-const startOrder = params.get("order");
+const startReceipt = params.get("receipt");
+const startOrder = startReceipt || params.get("order");
 if (startOrder && /^\d{1,12}$/.test(startOrder) && BigInt(startOrder) >= 1n) {
   selectTab("lookup");
   $("#f-lookup").value = startOrder;
-  state.view = { id: BigInt(startOrder), loading: true, data: null, inputs: { processor: net().processor || "", circuit: net().mockMint ? "1" : "", n: "" }, msgs: {}, preview: null, failedCase: null };
+  state.view = { id: BigInt(startOrder), loading: true, data: null, inputs: { processor: net().processor || "", circuit: net().mockMint ? "1" : "", n: "" }, msgs: {}, preview: null, failedCase: null, mode: startReceipt ? "receipt" : "order" };
 } else {
   selectTab(location.hash === "#order-lookup" ? "lookup" : "create");
 }

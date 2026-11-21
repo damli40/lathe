@@ -216,6 +216,119 @@
     "name": "maxGates",
     "type": "uint32",
     "internalType": "uint32"
+   },
+   {
+    "name": "labels",
+    "type": "bytes32[]",
+    "internalType": "bytes32[]"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "createOrder",
+  "inputs": [
+   {
+    "name": "nIn",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "nOut",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "table",
+    "type": "bytes",
+    "internalType": "bytes"
+   },
+   {
+    "name": "amount",
+    "type": "uint96",
+    "internalType": "uint96"
+   },
+   {
+    "name": "deadline",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "builder",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "maxGates",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "createStatefulOrder",
+  "inputs": [
+   {
+    "name": "nIn",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "nOut",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "nState",
+    "type": "uint8",
+    "internalType": "uint8"
+   },
+   {
+    "name": "table",
+    "type": "bytes",
+    "internalType": "bytes"
+   },
+   {
+    "name": "amount",
+    "type": "uint96",
+    "internalType": "uint96"
+   },
+   {
+    "name": "deadline",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "builder",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "maxGates",
+    "type": "uint32",
+    "internalType": "uint32"
+   },
+   {
+    "name": "labels",
+    "type": "bytes32[]",
+    "internalType": "bytes32[]"
    }
   ],
   "outputs": [
@@ -421,6 +534,25 @@
  },
  {
   "type": "function",
+  "name": "labelsOf",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes32[]",
+    "internalType": "bytes32[]"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
   "name": "nextOrderId",
   "inputs": [],
   "outputs": [
@@ -493,6 +625,40 @@
  },
  {
   "type": "function",
+  "name": "receipts",
+  "inputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "processor",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "tableHash",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   },
+   {
+    "name": "blockNumber",
+    "type": "uint64",
+    "internalType": "uint64"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
   "name": "refund",
   "inputs": [
    {
@@ -503,6 +669,88 @@
   ],
   "outputs": [],
   "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "ruleOf",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "processor",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "run",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "inputs",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "outputs",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "runStep",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "state",
+    "type": "bytes",
+    "internalType": "bytes"
+   },
+   {
+    "name": "inputs",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "newState",
+    "type": "bytes",
+    "internalType": "bytes"
+   },
+   {
+    "name": "outputs",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "stateMutability": "view"
  },
  {
   "type": "function",
@@ -650,6 +898,37 @@
  },
  {
   "type": "event",
+  "name": "Receipt",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "processor",
+    "type": "address",
+    "indexed": false,
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "tableHash",
+    "type": "bytes32",
+    "indexed": false,
+    "internalType": "bytes32"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
   "name": "Refunded",
   "inputs": [
    {
@@ -691,6 +970,11 @@
    }
   ],
   "anonymous": false
+ },
+ {
+  "type": "error",
+  "name": "BadInputs",
+  "inputs": []
  },
  {
   "type": "error",
@@ -759,6 +1043,11 @@
  },
  {
   "type": "error",
+  "name": "NotPaid",
+  "inputs": []
+ },
+ {
+  "type": "error",
   "name": "NotProcessor",
   "inputs": []
  },
@@ -791,6 +1080,11 @@
  {
   "type": "error",
   "name": "ShapeMismatch",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "ShortOutput",
   "inputs": []
  },
  {
@@ -828,6 +1122,11 @@
     "internalType": "uint256"
    }
   ]
+ },
+ {
+  "type": "error",
+  "name": "WrongLabelCount",
+  "inputs": []
  },
  {
   "type": "error",

@@ -125,3 +125,14 @@ test("payout after fee matches LatheOrders._pay (fee rounds down) and the percen
   assert.equal(feePercent(250), "2.5");
   assert.equal(feePercent(500), "5");
 });
+
+import { runGasLimit, runFitsSim, perCaseHold as hold2, RUN_OVERHEAD, SIM_GAS_CAP as CAP2 } from "../gas.js";
+
+test("run gas: overhead + netlist + one case's hold; big circuits do not fit the 48M test-call cap", () => {
+  const c = { base: 100_000n, perGate: 15_000n, reserve: 20_000n };
+  assert.equal(runGasLimit(c, 4), RUN_OVERHEAD + 600n * 4n + hold2(c, 4));
+  assert.ok(runFitsSim(c, 4));
+  assert.ok(runFitsSim(c, 652)); // the 8x8 multiplier
+  assert.ok(!runFitsSim(c, 4000)); // budget 60.1M is above the cap
+  assert.ok(runGasLimit(c, 3000) <= CAP2 === runFitsSim(c, 3000));
+});
