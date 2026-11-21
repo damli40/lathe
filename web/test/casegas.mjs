@@ -7,7 +7,9 @@
 //   (b) old path: the same circuit delivered with the three-argument deliver (sent with cast, as an older page
 //       would); checked through the page as 7, then 1: rejected at case 7, order back to Open.
 //   (c) a case that needs more than even 100,000,000 gas: the page says so and does not deliver.
-//   (d) a circuit whose cases fail in a test run: "could not test", never "fits"; the formula is used.
+//   (d) a circuit whose cases fail in a test run: "could not test", never "fits", and Deliver is off (before the
+//       case-gas review the page delivered with the formula here); (d2) one case tested at more than the formula
+//       and one that cannot be tested: Deliver off too (before, the page declared a value from the tested case only).
 //   (e) a cheap circuit: "fits", delivered as before (no declared gas).
 //   (f) the create form warns (does not block) when the deadline is more than 90 days away, in English and Chinese.
 // Run from the repo root: node web/test/casegas.mjs
@@ -110,6 +112,10 @@ try {
   send(P, "setRevertEval(uint256,bool)", "21", "true");
   send(P, "setCircuit(uint256,address,uint32,uint32,uint32,uint32)", "22", ANVIL_ACCOUNT0, "1", "1", "0", "4");
   send(P, "setOuts(uint256,bytes[])", "22", "[0x00,0x01]");
+  send(P, "setCircuit(uint256,address,uint32,uint32,uint32,uint32)", "23", ANVIL_ACCOUNT0, "1", "1", "0", "4");
+  send(P, "setOuts(uint256,bytes[])", "23", "[0x00,0x01]");
+  send(P, "setCaseGasCost(uint256,uint256,uint256)", "23", "0", "600000"); // above the formula 160,000
+  send(P, "setCaseGasCost(uint256,uint256,uint256)", "23", "1", "200000000"); // above even the retry cap: untested
 
   console.log("(c) a case above even 100,000,000 gas: refused before sending");
   const c = await createOrder(page, { preset: "xor", amount: "1", nIn: 1 });
@@ -132,6 +138,35 @@ try {
   assert(/Could not test 2 case\(s\): 0, 1\./.test(un), `says which cases: "${un}"`);
   assert(!/fits the standard gas/.test(un), "never says they fit");
   assert((await page.locator("#casegas").getAttribute("data-declared")) === "0", "no declared gas");
+  assert(/Either way, delivered with the standard gas it would be rejected/.test(un), "says the standard gas would be rejected");
+  assert(/the page will not deliver it/.test(un), "says it will not deliver");
+  const recipe = (await page.locator("#casegas-recipe").textContent()).trim();
+  assert(recipe === `node scripts/measure-case-gas.mjs --rpc YOUR_NODE_URL --lathe ${L} --order ${d} --processor ${P} --circuit 21`, `gives the one-line recipe: "${recipe}"`);
+  assert(await page.locator("#deliver-btn").isDisabled(), "the deliver button is off");
+  const sentBefore = await page.evaluate(() => window.__shim.sent.length);
+  await page.locator("#deliver-btn").click({ force: true }).catch(() => {});
+  assert((await page.evaluate(() => window.__shim.sent.length)) === sentBefore, "nothing sent");
+  assert((await statusText(page)) === "Open", "nothing delivered");
+
+  console.log("(d2) one case needs more than the formula, one cannot be tested: Deliver off, no value proposed from half the cases");
+  const d2 = await createOrder(page, { preset: "xor", amount: "1", nIn: 1 });
+  await openOrder(page, d2);
+  await page.fill("#f-proc", P);
+  await readCircuit(page, 23);
+  assert((await page.locator("#casegas").getAttribute("data-kind")) === "untested", "plan is untested, not declare");
+  const un2 = await page.locator("#casegas").textContent();
+  assert(/^Of the cases that could be tested/.test(un2.trim()), "does not claim every case was tested");
+  assert(/Could not test 1 case\(s\): 1\./.test(un2), `names case 1: "${un2.slice(0, 200)}"`);
+  assert((await page.locator("#casegas").getAttribute("data-declared")) === "0", "no declared gas");
+  assert(await page.locator("#deliver-btn").isDisabled(), "the deliver button is off");
+  const zhd = await ctx.newPage();
+  await openTool(zhd, server.url + "?lang=zh");
+  await openOrder(zhd, d2);
+  await zhd.fill("#f-proc", P);
+  await readCircuit(zhd, 23);
+  const zu = await zhd.locator("#casegas").textContent();
+  assert(/有 1 种情况无法测试：1。/.test(zu) && /页面不会交付它/.test(zu), `Chinese text: "${zu.slice(0, 160)}"`);
+  await zhd.close();
 
   console.log("(e) a cheap circuit: fits, delivered as before");
   const e = await createOrder(page, { preset: "xor", amount: "1", nIn: 1 });
@@ -175,7 +210,7 @@ try {
   assert(/90 天以后/.test(zw), `Chinese warning: "${zw}"`);
 
   assert(errors.length === 0, "no page errors" + (errors.length ? ": " + errors.join(" | ") : ""));
-  console.log("CASEGAS PASS: declared and paid under a split, old path rejected, too big refused, untested never fits, cheap as before, far-deadline warning");
+  console.log("CASEGAS PASS: declared and paid under a split, old path rejected, too big refused, untested never fits and is never delivered, cheap as before, far-deadline warning");
 } catch (e) {
   console.error("CASEGAS FAIL:", e.message);
   const box = await page?.locator("#order-view").textContent().catch(() => "");

@@ -197,9 +197,25 @@ test("planCaseGas: above MAX_CASE_GAS -> tooBig; untested cases are listed, neve
   const none = G.planCaseGas(CG, 25, [null, null]);
   assert.equal(none.kind, "untested");
   assert.equal(none.worstCase, -1);
-  assert.equal(G.planCaseGas(CG, 25, [600_000n, null]).kind, "declare", "a tested case that needs more still declares");
+  // Before the case-gas review this was "declare" (delivered with a value proposed from the tested cases only).
+  assert.equal(G.planCaseGas(CG, 25, [600_000n, null]).kind, "untested", "one untested case blocks a declared delivery too");
+  assert.ok(G.planBlocks(p) && G.planBlocks(none), "the page does not deliver while a case is untested");
+  assert.equal(G.planCaseGas(CG, 25, [95_000_000n, null]).kind, "tooBig", "a tested case too big for any gas says so first");
   assert.ok(G.simRetryCap(CG) > (CG.maxCaseGas * 64n) / 63n);
   assert.deepEqual(none.untested, [0, 1]);
+});
+
+test("planCaseGas: a gate cap that promises an inline check refuses a proposal that would break it", () => {
+  const needs = new Array(64).fill(450_000n); // proposed 450,000 x 64/63 x 1.1 = 502,858 -> 510,000
+  // cap 24: 64 x 460,000 = 29.44M <= 30M, inline promised; 64 x 510,000 = 32.64M > 30M
+  const p = G.planCaseGas(CG, 24, needs, { cases: 64, maxGates: 24 });
+  assert.equal(p.kind, "capped");
+  assert.equal(p.share, 468_750n);
+  assert.ok(G.planBlocks(p));
+  assert.equal(G.planCaseGas(CG, 24, needs, { cases: 64, maxGates: 0 }).kind, "declare", "no cap: declare");
+  assert.equal(G.planCaseGas(CG, 24, needs, { cases: 64, maxGates: 500 }).kind, "declare", "cap already batched: declare");
+  assert.equal(G.planCaseGas(CG, 20, new Array(64).fill(400_000n), { cases: 64, maxGates: 24 }).kind, "declare", "proposal within the share (450,000 <= 468,750): declare");
+  assert.ok(!G.planBlocks(G.planCaseGas(CG, 25, [100_000n])), "formula: delivers");
 });
 
 test("needFromEstimate subtracts the call's intrinsic gas", () => {

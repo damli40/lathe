@@ -357,6 +357,42 @@ async function read(address, abi, functionName, args = []) {
   return state.pub.readContract({ address, abi, functionName, args });
 }
 
+// An error that says nothing about the contract: the node was down, slow, busy or rate-limited (HTTP 429, 5xx,
+// JSON-RPC -32005 "limit exceeded", -32002, an internal error that does not mention a revert). Matched by name
+// and code, not instanceof (the CDN build can hold more than one copy of a class).
+const TRANSIENT_NAMES = new Set(["HttpRequestError", "TimeoutError", "LimitExceededRpcError", "ResourceUnavailableRpcError", "WebSocketRequestError", "SocketClosedError"]);
+function isTransient(err) {
+  const hit = (e) =>
+    TRANSIENT_NAMES.has(e?.name) || e?.code === -32005 || e?.code === -32002 || e?.code === 429 || e?.status === 429 || (e?.status >= 500 && e?.status < 600) ||
+    (e?.code === -32603 && !/revert/i.test(String(e?.details || e?.shortMessage || e?.message || "")));
+  if (!err) return false;
+  if (typeof err.walk === "function") return !!err.walk(hit);
+  return hit(err);
+}
+
+// Feature detection: a read of a function the contract may not have. Only a revert (the node ran the call and it
+// failed) or an empty answer (no such function, no fallback) means "this contract does not have it". Every other
+// error is thrown, so the caller shows "could not read, try again" instead of turning a busy node into a
+// remembered "older contract" (it was: a -32005 rate limit on caseGasOf made the page say the new contract was
+// old and send the three-argument deliver).
+function isMissingFunction(err) {
+  if (!err || typeof err.walk !== "function" || isTransient(err)) return false;
+  if (err.walk((e) => e?.name === "ContractFunctionZeroDataError" || e?.name === "ExecutionRevertedError")) return true;
+  const rev = err.walk((e) => e?.name === "ContractFunctionRevertedError");
+  // viem also builds this error from a -32603 internal error; then its reason is the node's message, not a revert.
+  return !!rev && (!!rev.data || !!rev.signature || !rev.reason || /revert/i.test(rev.reason));
+}
+
+/** read(), or `fallback` when the contract does not have this function (isMissingFunction). Anything else throws. */
+async function readOr(address, abi, functionName, args, fallback) {
+  try {
+    return await read(address, abi, functionName, args);
+  } catch (e) {
+    if (isMissingFunction(e)) return fallback;
+    throw e;
+  }
+}
+
 // Every request to a network without parallelReads goes through one queue, so at most one is in flight at a
 // time, whichever part of the page sent it (form reads, order view, receipt polling). viem's own http transport
 // does the work, so its error types and retries are kept.
@@ -388,7 +424,10 @@ async function readMany(thunks) {
 // perRef is EVAL_GAS_PER_REF (extra run gas per piece for a top circuit); 0 for a contract from before it.
 const INFO_BIG = ["base", "perGate", "reserve", "inlineMax", "maxCaseGas", "grace", "perRef"];
 // hasCaseGas: the contract takes a declared per-case gas (deliver with caseGas, caseGasOf); false before the fix.
-const infoCacheKey = (n) => `lathe.info.v4.${n.chainId}.${n.lathe.toLowerCase()}`;
+// Only a positive result is kept across page loads: an entry is saved only when perRef > 0 and hasCaseGas is
+// true, and an entry saying otherwise is ignored. A negative (an older contract) is re-read on every load, so a
+// wrong negative can never stick. v5: entries written by v4 could hold a negative caused by a rate limit.
+const infoCacheKey = (n) => `lathe.info.v5.${n.chainId}.${n.lathe.toLowerCase()}`;
 const isInt = (x, lo, hi) => Number.isInteger(x) && x >= lo && x <= hi;
 
 // A cached entry is used only if every field has the right type and a sane range; anything else is re-read.
@@ -404,7 +443,7 @@ function cachedInfo(raw) {
   if (!isInt(c.decimals, 0, 36) || !isInt(c.feeBps, 0, 500)) return null;
   if (!state.viem.isAddress(c.token || "") || !state.viem.isAddress(c.factory || "")) return null;
   if (typeof c.symbol !== "string" || c.symbol.length > 32) return null;
-  if (typeof c.hasCaseGas !== "boolean") return null;
+  if (c.hasCaseGas !== true || c.perRef <= 0n) return null;
   return c;
 }
 
@@ -438,29 +477,20 @@ async function loadInfo() {
     maxCaseBits: Number(r[6]), maxAnswerBits: Number(r[7]), factory: r[8], token: r[9], feeBps: Number(r[10]),
   };
   // A contract from before the top-run fix has no EVAL_GAS_PER_REF and gave a top evalBudget alone: 0 then.
-  // A network failure is not taken as "old contract": it is thrown, like every other read here.
-  try {
-    i.perRef = await read(L, A, "EVAL_GAS_PER_REF");
-  } catch (e) {
-    if (explain(e, { read: true }).name === "network") throw e;
-    i.perRef = 0n;
-  }
-  // caseGasOf exists only on a contract with the declared per-case gas; a revert means an older contract.
-  try {
-    await read(L, A, "caseGasOf", [0n]);
-    i.hasCaseGas = true;
-  } catch (e) {
-    if (explain(e, { read: true }).name === "network") throw e;
-    i.hasCaseGas = false;
-  }
+  // caseGasOf exists only on a contract with the declared per-case gas. Only a revert or an empty answer means
+  // "older contract" (readOr); a busy or rate-limited node is thrown, so the page says it could not read.
+  i.perRef = await readOr(L, A, "EVAL_GAS_PER_REF", [], 0n);
+  i.hasCaseGas = (await readOr(L, A, "caseGasOf", [0n], null)) !== null;
   const [dec, sym] = await readMany([() => read(i.token, state.tokenAbi, "decimals"), () => read(i.token, state.tokenAbi, "symbol")]);
   i.decimals = Number(dec);
   i.symbol = sym;
   i.tokenMismatch = !!n.token && !sameAddr(n.token, i.token);
   state.info[n.key] = i;
-  const save = { ...i };
-  for (const k of INFO_BIG) save[k] = save[k].toString();
-  store.set(cacheKey, JSON.stringify(save));
+  if (i.hasCaseGas && i.perRef > 0n) {
+    const save = { ...i };
+    for (const k of INFO_BIG) save[k] = save[k].toString();
+    store.set(cacheKey, JSON.stringify(save));
+  }
   return i;
 }
 
@@ -1541,12 +1571,8 @@ async function loadOrder(id, keep = {}) {
         now: block.timestamp,
         nowAt: performance.now(),
       };
-      // Names are optional and a contract from before V2 has no labelsOf: a failed read shows no names.
-      try {
-        data.labels = decodeLabels(await read(L, A, "labelsOf", [id]));
-      } catch {
-        data.labels = [];
-      }
+      // Names are optional and a contract from before V2 has no labelsOf: its revert shows no names (readOr).
+      data.labels = decodeLabels(await readOr(L, A, "labelsOf", [id], []));
       data.pieces = await readPieces(L, A, id);
       const pieced = data.pieces.length > 0;
       if (pieced) Object.assign(data, await readWiring(L, A, id, data.pieces));
@@ -1580,27 +1606,18 @@ async function loadOrder(id, keep = {}) {
 }
 
 // The per-case gas stored with a delivery (caseGasOf / pieceCaseGasOf): null on a contract from before it, which
-// gave every case the formula (G.caseBudget then uses the formula). A network failure is thrown, as elsewhere.
+// gave every case the formula (G.caseBudget then uses the formula). Any error but a revert is thrown (readOr).
 async function readCaseGas(L, A, fn, args) {
-  try {
-    return await read(L, A, fn, args);
-  } catch (e) {
-    if (explain(e, { read: true }).name === "network") throw e;
-    return null;
-  }
+  if (!info()?.hasCaseGas) return null;
+  return readOr(L, A, fn, args, null);
 }
 
 // A pieced order's pieces (createPiecedOrder) and each piece's record, gate cap and table. Empty for a V0-V2 order,
-// and for a contract from before pieced orders (no piecesOf): that read reverts, which here means "no pieces". A
-// network failure is not taken as "no pieces": it is thrown, so the view shows the read error instead of a V0 view.
+// and for a contract from before pieced orders (no piecesOf): that read reverts, which here means "no pieces". Any
+// other error (node down, busy, rate-limited) is thrown, so the view shows the read error instead of a V0 view.
 async function readPieces(L, A, id) {
-  let raw;
-  try {
-    raw = await read(L, A, "piecesOf", [id]);
-  } catch (e) {
-    if (explain(e, { read: true }).name === "network") throw e;
-    return [];
-  }
+  const raw = await readOr(L, A, "piecesOf", [id], null);
+  if (raw === null) return [];
   const pieces = raw.map((p) => ({ kind: Number(p.kind), nIn: Number(p.nIn), nOut: Number(p.nOut), widthA: Number(p.widthA), widthB: Number(p.widthB) }));
   const per = await readMany(pieces.flatMap((_, i) => [
     () => read(L, A, "pieceOf", [id, BigInt(i)]),
@@ -1620,16 +1637,9 @@ async function readPieces(L, A, id) {
 }
 
 // A pieced order's wires (wiresOf) and kind (needsTop). A contract from before V4 has neither: its orders are the
-// fixed join (P.defaultWires) and pay when the last piece passes. As in readPieces, a network failure is thrown.
+// fixed join (P.defaultWires) and pay when the last piece passes. As in readPieces, only a revert means "absent".
 async function readWiring(L, A, id, pieces) {
-  const tryRead = async (fn, fallback) => {
-    try {
-      return await read(L, A, fn, [id]);
-    } catch (e) {
-      if (explain(e, { read: true }).name === "network") throw e;
-      return fallback;
-    }
-  };
+  const tryRead = (fn, fallback) => readOr(L, A, fn, [id], fallback);
   const raw = await tryRead("wiresOf", null);
   const wires = raw ? raw.map(P.normWire) : P.defaultWires(pieces);
   const needsTop = (await tryRead("needsTop", false)) === true;
@@ -1867,7 +1877,7 @@ function deliverBox(o, now) {
   else if (!sameAddr(state.account, o.builder)) gate = txt("tool.deliver.onlyBuilder", { addr: short(o.builder) });
   else if (wrongNetwork()) gate = txt("tool.wallet.wrongNet", { net: txt("tool.network." + n.key) });
   const label = v.busy === "deliver" ? txt("tool.deliver.simulating") : txt("tool.deliver.deliverBtn", { id: v.inputs.circuit || "" }).trim();
-  const dBtn = el("button", { type: "button", class: "btn btn-primary", id: "deliver-btn", text: label, disabled: !!gate || !!v.busy || pv?.plan?.kind === "tooBig" });
+  const dBtn = el("button", { type: "button", class: "btn btn-primary", id: "deliver-btn", text: label, disabled: !!gate || !!v.busy || G.planBlocks(pv?.plan) });
   dBtn.addEventListener("click", () => doDeliver(o));
   box.append(dBtn);
   if (gate) box.append(el("p", { class: "help", text: gate }));
@@ -1888,16 +1898,23 @@ function caseGasNode(pv) {
   const i = info();
   const wrap = el("div", { id: "casegas", "data-kind": p.kind, "data-declared": pv.caseGas.toString() });
   const say = (key, vars, cls = "") => wrap.append(el("p", { class: cls, text: txt("tool.deliver.caseGas." + key, vars) }));
-  if (p.worstCase >= 0) say("worst", { c: p.worstCase, need: fmtInt(p.worst) });
+  if (p.worstCase >= 0) say(p.untested.length ? "worstTested" : "worst", { c: p.worstCase, need: fmtInt(p.worst) });
   if (p.kind === "formula") say("fits", { formula: fmtInt(p.formula) });
   if (p.kind === "declare" && i.hasCaseGas) {
     say("declare", { formula: fmtInt(p.formula), gas: fmtInt(p.proposed) });
     say("txs", { declared: pv.txs.declared ?? "-", formula: pv.txs.formula ?? "-" });
   }
   if (p.kind === "declare" && !i.hasCaseGas) say("oldContract", { formula: fmtInt(p.formula) }, "msg is-err");
+  if (p.kind === "capped") {
+    say("capped", { max: fmtInt(pv.orderMaxGates), cases: pv.cases, share: fmtInt(p.share), gas: fmtInt(p.proposed) }, "msg is-err");
+  }
   if (p.untested.length) {
     const list = p.untested.length > 8 ? p.untested.slice(0, 8).join(", ") + ", ..." : p.untested.join(", ");
     say("untested", { n: p.untested.length, list, cap: fmtInt(G.SIM_GAS_CAP) }, "msg is-err");
+    if (p.formula < G.SIM_GAS_CAP) say("untestedReject", { formula: fmtInt(p.formula) }, "msg is-err");
+    say(p.kind === "untested" ? "untestedOff" : "untestedOwnNode");
+    const cmd = `node scripts/measure-case-gas.mjs --rpc YOUR_NODE_URL --lathe ${net().lathe} --order ${pv.orderId} --processor ${pv.processor} --circuit ${pv.id}`;
+    wrap.append(el("pre", { class: "mono", id: "casegas-recipe", text: cmd }));
   }
   return wrap;
 }
@@ -1931,12 +1948,8 @@ async function readCircuit(o) {
   const i = info();
   try {
     const isCpu = await read(i.factory, state.factoryAbi, "isCPU", [inp.processor]);
-    let owner = null;
-    try {
-      owner = await read(inp.processor, state.procAbi, "ownerOf", [inp.id]);
-    } catch {
-      owner = null;
-    }
+    // ownerOf reverts for a circuit that does not exist; a busy node is thrown, not shown as "no such circuit".
+    const owner = await readOr(inp.processor, state.procAbi, "ownerOf", [inp.id], null);
     if (!owner && isCpu) {
       v.preview = null;
       v.msgs.deliver = { err: true, text: txt("tool.deliver.noCircuit", { id: inp.id.toString() }) };
@@ -1954,14 +1967,14 @@ async function readCircuit(o) {
       let plan = null;
       if (shape.nIn === o.nIn && shape.nOut === o.nOut && shape.nState === o.nState) {
         const needs = await measureCases(o, inp, cases, () => state.view === v && v.inputs.processor + "|" + v.inputs.circuit === asked);
-        if (needs) plan = G.planCaseGas(i, gates, needs);
+        if (needs) plan = G.planCaseGas(i, gates, needs, { cases, maxGates: o.maxGates });
       }
       // Declare only when a case needs more than the formula with the margin, and the contract takes a declared gas.
       const caseGas = plan && plan.kind === "declare" && i.hasCaseGas ? plan.proposed : 0n;
       const budget = caseGas > 0n ? caseGas : formula;
       const g = G.deliverGasLimit(i, cases, gates, caseGas);
       const txs = { formula: G.checkTxCount(i, cases, gates), declared: caseGas > 0n ? G.checkTxCount(i, cases, gates, caseGas) : null };
-      v.preview = { processor: inp.processor, id: inp.id, isCpu, owner, ...shape, gates, formula, budget, caseGas, plan, txs, ...g };
+      v.preview = { processor: inp.processor, id: inp.id, orderId: v.id, orderMaxGates: o.maxGates, cases, isCpu, owner, ...shape, gates, formula, budget, caseGas, plan, txs, ...g };
     }
   } catch (e) {
     v.preview = null;
@@ -2003,7 +2016,9 @@ async function measureCases(o, inp, cases, still) {
         need = G.needFromEstimate(BigInt(est), data);
         break;
       } catch (e) {
-        if (explain(e, { read: true }).name === "network") throw e;
+        // A busy, rate-limited or unreachable node is not "this case failed": thrown, so the page says it could
+        // not read. Anything else (out of gas under the cap, a revert) leaves the case untested.
+        if (isTransient(e)) throw e;
       }
     }
     needs.push(need);
@@ -2023,6 +2038,8 @@ async function doDeliver(o) {
     v.msgs.deliver = { err: true, text: txt("tool.deliver.caseGas.tooBig", { c: pv.plan.worstCase, need: fmtInt(pv.plan.worst), max: fmtInt(info().maxCaseGas) }) + " " + txt("tool.deliver.refusedNotSent") };
     return renderOrder();
   }
+  // An untested case, or a proposal the order's gate cap refuses: the button is off; this is the same rule again.
+  if (G.planBlocks(pv.plan)) return renderOrder();
   v.busy = "deliver";
   v.failedCase = null;
   v.msgs.deliver = null;

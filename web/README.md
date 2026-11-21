@@ -180,8 +180,17 @@ node web/test/pieces.mjs
 #     transaction is dearer): the page tests all 64 cases, proposes a declared gas, delivers with the 4-argument
 #     deliver, and a 7 / 1 / 56 check split pays; the same circuit delivered with the 3-argument deliver is
 #     rejected at case 7 under the 7 / 1 split; a case above 100M is refused before sending; cases that fail in a
-#     test run are "could not test"; a cheap circuit is delivered as before; the far-deadline warning in EN and ZH
+#     test run are "could not test" and Deliver is off, with the measure-case-gas.mjs recipe (also when the other
+#     cases were tested and need more than the formula); a cheap circuit is delivered as before; the far-deadline
+#     warning in EN and ZH
 node web/test/casegas.mjs
+
+# 11. Feature detection through a busy node (a proxy that answers chosen reads itself): a -32005 rate limit or an
+#     HTTP 429 on caseGasOf(0), or -32005 on EVAL_GAS_PER_REF, shows "could not read, try again" with the tool
+#     off and nothing saved; Try again loads it and saves the positive result (keyed by chain id and address);
+#     a real revert of caseGasOf (an older contract) shows the older-contract warning and is not saved; in an
+#     order view, -32005 on caseGasOf(id) or piecesOf(id) is a read error with Try again
+node web/test/detect.mjs
 ```
 
 `node --test web/test/` also runs `pieces.test.mjs`: the join and piece answers, the wired rule (the fixed join as

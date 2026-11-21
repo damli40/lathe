@@ -232,6 +232,12 @@ contract LatheOrders is ReentrancyGuard {
     /// @notice Lock `amount` for a circuit with `nIn` inputs and `nOut` outputs that matches `table`.
     /// `builder` must be named: only that address may deliver. Open orders (anyone delivers) are not offered,
     /// because anyone could mint a copy of, or wrap, the honest builder's circuit and deliver it first.
+    /// `maxGates` caps the circuit's gates (0 = no cap). When cases x evalBudget(maxGates) <= INLINE_CHECK_MAX_GAS
+    /// the cap also promises that every delivery is checked inside deliver, so a wrong circuit reverts and can
+    /// never hold the order: deliver then refuses a declared caseGas above INLINE_CHECK_MAX_GAS / cases
+    /// (CaseGasTooHigh). The cost: such an order accepts only circuits whose costliest case fits that share of
+    /// 30M gas, so a circuit made of many links to other circuits (whose first, cold case needs more than its
+    /// formula budget) may not be deliverable on it. The same holds for a piece's cap and for memory orders.
     function createOrder(
         uint8 nIn,
         uint8 nOut,
@@ -380,6 +386,9 @@ contract LatheOrders is ReentrancyGuard {
     /// proxy passes on 63/64 of what it gets), plus a margin. Too little is still a wrong answer: the delivery is
     /// cleared, the order reopens, no money moves. More only raises the gas a checker must send per case; it
     /// cannot make a wrong answer pass (the answers are compared exactly as before).
+    /// On an order whose gate cap guarantees an inline check (see createOrder), a caseGas that would make
+    /// cases x caseGas exceed INLINE_CHECK_MAX_GAS is refused (CaseGasTooHigh), so it cannot turn that check
+    /// into batched checks that a wrong circuit could hold until deadline + GRACE.
     function deliver(uint256 orderId, address processor, uint256 circuitId, uint32 caseGas) external nonReentrant {
         _deliver(orderId, processor, circuitId, caseGas);
     }
@@ -388,7 +397,7 @@ contract LatheOrders is ReentrancyGuard {
         Order storage o = _openOrder(orderId, false);
         uint32 gates = _acceptCircuit(o, processor, circuitId, o.nIn, o.nOut, o.nState, o.maxGates);
         Delivery storage d = _deliveries[orderId];
-        _record(d, processor, circuitId, gates, _effectiveCaseGas(gates, caseGas));
+        _record(d, processor, circuitId, gates, _effectiveCaseGas(gates, caseGas, _cases(o), o.maxGates));
         o.status = Status.Checking;
         emit Delivered(orderId, msg.sender, processor, circuitId);
 
@@ -439,8 +448,19 @@ contract LatheOrders is ReentrancyGuard {
     /// CircuitTooBigToCheck, a declared one above it CaseGasTooHigh. Not applied to a top circuit (deliverTop),
     /// which is never checked case by case: its gate count is the sum of its pieces' gates, so this guard would
     /// refuse an honest top made of big pieces that each passed.
-    function _effectiveCaseGas(uint256 gates, uint256 declared) internal pure returns (uint32) {
+    /// A gate cap that keeps cases x evalBudget(cap) <= INLINE_CHECK_MAX_GAS promises the buyer an inline check
+    /// (a wrong circuit reverts here and can never hold the order), so a declared value that would push the
+    /// order into batched checks is refused too (CaseGasTooHigh): on such an order the declared value is at most
+    /// INLINE_CHECK_MAX_GAS / cases.
+    function _effectiveCaseGas(uint256 gates, uint256 declared, uint256 cases, uint256 cap)
+        internal
+        pure
+        returns (uint32)
+    {
         if (declared > MAX_CASE_GAS) revert CaseGasTooHigh();
+        if (cap != 0 && cases * evalBudget(cap) <= INLINE_CHECK_MAX_GAS && cases * declared > INLINE_CHECK_MAX_GAS) {
+            revert CaseGasTooHigh();
+        }
         uint256 b = evalBudget(gates);
         if (b > MAX_CASE_GAS) revert CircuitTooBigToCheck();
         return uint32(b > declared ? b : declared);
@@ -662,7 +682,9 @@ contract LatheOrders is ReentrancyGuard {
     /// @notice deliverPiece with the gas each case gets stated by the builder, exactly as deliver with caseGas:
     /// max(evalBudget(gates), caseGas), at most MAX_CASE_GAS, fixed for this delivery (pieceCaseGasOf) and used by
     /// checkPiece, the inline check and run. A top circuit's run budget adds what each piece was given above its
-    /// formula (see run).
+    /// formula (see run). The piece's gate cap (pieceMaxGatesOf) keeps its inline-check promise exactly as an
+    /// order's does (see createOrder): with 2^nIn x evalBudget(cap) <= INLINE_CHECK_MAX_GAS, a caseGas above
+    /// INLINE_CHECK_MAX_GAS / 2^nIn is CaseGasTooHigh.
     function deliverPiece(uint256 orderId, uint256 pieceIndex, address processor, uint256 circuitId, uint32 caseGas)
         external
         nonReentrant
@@ -679,7 +701,7 @@ contract LatheOrders is ReentrancyGuard {
         {
             uint32 cap = pieceMaxGatesOf[orderId][pieceIndex];
             uint32 gates = _acceptCircuit(o, processor, circuitId, p.nIn, p.nOut, 0, cap);
-            _record(d, processor, circuitId, gates, _effectiveCaseGas(gates, caseGas));
+            _record(d, processor, circuitId, gates, _effectiveCaseGas(gates, caseGas, uint256(1) << p.nIn, cap));
         }
         emit PieceDelivered(orderId, pieceIndex, processor, circuitId);
         _checkPieceInlineIfSmall(orderId, pieceIndex, o, p, d);

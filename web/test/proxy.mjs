@@ -3,13 +3,16 @@
 // - counts the most requests in flight at once;
 // - can answer chosen methods with HTTP 503 (st.fail = new Set([...])) to stand in for a node that is down;
 // - can delay every answer (st.delay, ms);
-// - st.cap lowers the eth_call cap for one test (default RPC_CALL_GAS_CAP).
+// - st.cap lowers the eth_call cap for one test (default RPC_CALL_GAS_CAP);
+// - st.answer(m), when set, may answer a request itself: return a JSON-RPC error object ({ code, message }) to send
+//   it with HTTP 200, { http: 429 } (or another status) for an HTTP error, or null to forward it. st.forced counts
+//   the requests it answered.
 import { createServer } from "node:http";
 
 export const RPC_CALL_GAS_CAP = 50_000_000n;
 
 export function startProxy(target, port) {
-  const st = { clamp: true, cap: RPC_CALL_GAS_CAP, inflight: 0, max: 0, delay: 0, fail: new Set(), seen: [], callGas: [] };
+  const st = { clamp: true, cap: RPC_CALL_GAS_CAP, inflight: 0, max: 0, delay: 0, fail: new Set(), seen: [], callGas: [], answer: null, forced: 0 };
   const srv = createServer(async (req, res) => {
     let body = "";
     for await (const ch of req) body += ch;
@@ -35,6 +38,17 @@ export function startProxy(target, port) {
       if (arr.some((m) => st.fail.has(m.method))) {
         res.writeHead(503, { "content-type": "text/plain", ...cors });
         return res.end("unavailable");
+      }
+      const forced = st.answer ? arr.map((m) => st.answer(m)).find(Boolean) : null;
+      if (forced) {
+        st.forced++;
+        if (forced.http) {
+          res.writeHead(forced.http, { "content-type": "text/plain", ...cors });
+          return res.end("too many requests");
+        }
+        const one = (m) => ({ jsonrpc: "2.0", id: m.id, error: forced });
+        res.writeHead(200, { "content-type": "application/json", ...cors });
+        return res.end(JSON.stringify(Array.isArray(j) ? arr.map(one) : one(j)));
       }
       const r = await fetch(target, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(j) });
       const t = await r.text();

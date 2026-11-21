@@ -264,16 +264,21 @@ export function proposeCaseGas(worst) {
 /**
  * Decide a delivery from every case's measured need. `needs[i]` is case i's need (BigInt), or null when the case
  * could not be tested (it did not finish under the public node's eth_call cap, or it failed). An untested case
- * never counts as fitting.
- * Returns { kind, formula, worst, worstCase, proposed, untested }:
- *   "formula"  every tested case fits the formula budget with the margin: deliver as before (no declared gas);
- *   "declare"  some case needs more: deliver with `proposed` as the per-case gas;
- *   "tooBig"   even MAX_CASE_GAS would not be enough: do not deliver;
- *   "untested" no tested case needs more than the formula, but some case could not be tested: deliver with the
- *              formula, and say plainly that nothing is known about those cases (never that they fit).
- * `untested` lists the cases with no measurement; when it is not empty the page says so and claims nothing for them.
+ * never counts as fitting, and the page never delivers while one is untested.
+ * `opts.cases` and `opts.maxGates` are the order's case count and gate cap (0 = none), for the gate-cap rule below.
+ * Returns { kind, formula, worst, worstCase, proposed, untested, share }:
+ *   "formula"  every case was tested and fits the formula budget with the margin: deliver as before;
+ *   "declare"  every case was tested and some case needs more: deliver with `proposed` as the per-case gas;
+ *   "tooBig"   even MAX_CASE_GAS would not be enough for a tested case: do not deliver;
+ *   "untested" some case could not be tested: do not deliver. With a formula budget below the test cap such a case
+ *              needed more than the formula or reverted, so the contract would reject the circuit; above it,
+ *              nothing is known. A builder with their own node measures it (scripts/measure-case-gas.mjs);
+ *   "capped"   the order's gate cap promises an inline check (cases x evalBudget(maxGates) <= INLINE_CHECK_MAX_GAS)
+ *              and the proposal would break it (cases x proposed > INLINE_CHECK_MAX_GAS): LatheOrders refuses that
+ *              (CaseGasTooHigh), so do not deliver. `share` is the most such an order accepts per case.
+ * `untested` lists the cases with no measurement.
  */
-export function planCaseGas(c, gateCount, needs) {
+export function planCaseGas(c, gateCount, needs, opts = {}) {
   const formula = evalBudget(c, gateCount);
   let worst = 0n;
   let worstCase = -1;
@@ -286,11 +291,17 @@ export function planCaseGas(c, gateCount, needs) {
     }
   });
   const proposed = worstCase < 0 ? 0n : proposeCaseGas(worst);
+  const cases = BigInt(opts.cases ?? needs.length);
+  const share = cases > 0n ? c.inlineMax / cases : 0n;
   let kind = proposed <= formula ? "formula" : "declare";
   if (proposed > c.maxCaseGas) kind = "tooBig";
-  if (kind === "formula" && untested.length) kind = "untested";
-  return { kind, formula, worst, worstCase, proposed, untested };
+  else if (untested.length) kind = "untested";
+  else if (kind === "declare" && opts.maxGates && cases * evalBudget(c, opts.maxGates) <= c.inlineMax && cases * proposed > c.inlineMax) kind = "capped";
+  return { kind, formula, worst, worstCase, proposed, untested, share };
 }
+
+/** A plan the page must not deliver on. */
+export const planBlocks = (p) => !!p && (p.kind === "tooBig" || p.kind === "untested" || p.kind === "capped");
 
 /** Check transactions a full check needs at most, with this per-case gas (the most cases per transaction). */
 export function checkTxCount(c, cases, gateCount, caseGas) {

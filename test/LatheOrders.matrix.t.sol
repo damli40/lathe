@@ -12,6 +12,12 @@ import {Wire} from "../src/NetlistLib.sol";
 /// overloads deliver and deliverPiece with a declared caseGas) = 660 cells. After every call, whatever it did or
 /// refused: the tokens the contract holds equal the open order's amount (if it is Open or Checking) plus the fees
 /// owed, and a stored per-case gas exists exactly when a delivery does (top circuits store none).
+///
+/// What it can see: after one call from a fixed starting state, whether the contract's token balance still
+/// matches what it owes, and the stored-gas invariant. What it cannot see: a payment that leaves the contract but
+/// goes to the wrong address (the balance check only counts what stayed), and anything that needs a sequence of
+/// calls (each cell is a single call from a snapshot). test_sequence_rejectRedeliverPay below covers one such
+/// sequence and checks each recipient's balance.
 contract LatheOrdersMatrixTest is WiredBase {
     // proc ids
     uint256 constant XOR_S = 10; uint256 constant XOR_B = 11; uint256 constant TOG_S = 12; uint256 constant TOG_B = 13;
@@ -133,5 +139,42 @@ contract LatheOrdersMatrixTest is WiredBase {
             vm.revertTo(snap0);
         }
         assertEq(cells, 660);
+    }
+
+    /// A sequence the matrix cannot see: a wrong circuit delivered with a declared gas is rejected, the builder
+    /// redelivers a right one with a new declared gas, a stranger pushes the check, the order pays. Asserts who got
+    /// what: the builder the amount minus the fee, the fee recipient the fee, the buyer and the checker nothing.
+    function test_sequence_rejectRedeliverPay() public {
+        uint256 bad = 40;
+        setCircuitFromTable(bad, builder, 2, 1, hex"06", BATCHED_GATES);
+        proc.setOut(bad, 2, hex"00"); // xor(2) = 1; answer 0
+        vm.prank(buyer);
+        uint256 o = lathe.createOrder(2, 1, hex"06", AMOUNT, deadline, builder, 0);
+        uint256 buyer0 = usdt.balanceOf(buyer);
+
+        vm.prank(builder);
+        lathe.deliver(o, address(proc), bad, 8_000_000); // 4 x 8M > 30M: batched
+        assertEq(lathe.caseGasOf(o), 8_000_000);
+        vm.prank(stranger);
+        (bool done, bool passed) = lathe.check{gas: 100_000_000}(o, 4);
+        assertTrue(done && !passed, "rejected");
+        assertEq(uint8(status(o)), 0, "reopened");
+        assertEq(lathe.caseGasOf(o), 0, "cleared");
+
+        vm.prank(builder);
+        lathe.deliver(o, address(proc), XOR_B, 9_000_000);
+        assertEq(lathe.caseGasOf(o), 9_000_000, "new declared value");
+        vm.prank(stranger);
+        (done, passed) = lathe.check{gas: 100_000_000}(o, 4);
+        assertTrue(done && passed, "paid");
+
+        uint256 fee = uint256(AMOUNT) * FEE_BPS / 10_000;
+        assertEq(usdt.balanceOf(builder), AMOUNT - fee, "builder: amount - fee");
+        assertEq(usdt.balanceOf(stranger), 0, "checker: nothing");
+        assertEq(usdt.balanceOf(buyer), buyer0, "buyer: nothing back");
+        assertEq(usdt.balanceOf(address(lathe)), fee, "contract: the fee");
+        lathe.claimFees();
+        assertEq(usdt.balanceOf(feeTo), fee, "fee recipient: the fee");
+        assertEq(usdt.balanceOf(address(lathe)), 0, "contract: empty");
     }
 }

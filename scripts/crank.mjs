@@ -18,9 +18,11 @@ const HELP = `usage: node scripts/crank.mjs --lathe ADDR --order N --piece I --b
 
 The crank only checks. The builder delivers first, with cast:
   deliverPiece(uint256,uint256,address,uint256)            each case gets 100,000 + 15,000 x gates
-  deliverPiece(uint256,uint256,address,uint256,uint32)     the same with --case-gas N: each case gets
-      max(formula, N), at most 100,000,000. Declare N = (gas the costliest case needs when it runs first in a
-      transaction) x 64/63 + a margin. The crank reads it back (pieceCaseGasOf) and sizes every batch from it.`;
+  deliverPiece(uint256,uint256,address,uint256,uint32)     the same with a declared per-case gas N (the last
+      argument): each case gets max(formula, N), at most 100,000,000. To find N, run
+      node scripts/measure-case-gas.mjs --rpc URL --lathe ADDR --order N --piece I --processor ADDR --circuit ID
+      which measures every case and prints N and the exact cast command. The crank reads N back (pieceCaseGasOf)
+      and sizes every batch from it.`;
 
 // Gas maths. Each case's eval gets exactly the delivery's per-case gas: pieceCaseGasOf(order, piece), which is
 // evalBudget(gateCount) or more if the builder declared more at delivery (deliverPiece with caseGas). A contract
