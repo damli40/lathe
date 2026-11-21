@@ -6,6 +6,7 @@ import { strings, t as tr, LANGS } from "./i18n.js";
 import { networks, DEFAULT_NETWORK, VIEM_URL, pickNetKey } from "./config.js";
 import * as T from "./table.js";
 import * as G from "./gas.js";
+import * as P from "./pieces.js";
 
 const NETS = networks();
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -1522,9 +1523,15 @@ async function loadOrder(id, keep = {}) {
       } catch {
         data.labels = [];
       }
+      data.pieces = await readPieces(L, A, id);
+      const pieced = data.pieces.length > 0;
       if (state.view.mode === "receipt" && data.order.status === 2) {
         const r = await read(L, A, "receipts", [id]);
         data.receipt = { processor: r[0], circuitId: r[1], tableHash: r[2], blockNumber: r[3] };
+        if (pieced) data.piecedHash = await read(L, A, "piecedHash", [id]);
+      }
+      // A 2-piece order has no single circuit, so ruleOf is not asked (it would revert NoSingleCircuit by design).
+      if (state.view.mode === "receipt" && data.order.status === 2 && data.pieces.length <= 1) {
         try {
           const rule = await read(L, A, "ruleOf", [id]);
           data.rule = { processor: rule[0], circuitId: rule[1] };
@@ -1545,6 +1552,42 @@ async function loadOrder(id, keep = {}) {
   renderOrder();
 }
 
+// A pieced order's pieces (createPiecedOrder) and each piece's record, gate cap and table. Empty for a V0-V2 order,
+// and for a contract from before pieced orders (no piecesOf): that read reverts, which here means "no pieces". A
+// network failure is not taken as "no pieces": it is thrown, so the view shows the read error instead of a V0 view.
+async function readPieces(L, A, id) {
+  let raw;
+  try {
+    raw = await read(L, A, "piecesOf", [id]);
+  } catch (e) {
+    if (explain(e, { read: true }).name === "network") throw e;
+    return [];
+  }
+  const pieces = raw.map((p) => ({ kind: Number(p.kind), nIn: Number(p.nIn), nOut: Number(p.nOut), widthA: Number(p.widthA), widthB: Number(p.widthB) }));
+  const per = await readMany(pieces.flatMap((_, i) => [
+    () => read(L, A, "pieceOf", [id, BigInt(i)]),
+    () => read(L, A, "pieceTableOf", [id, BigInt(i)]),
+    () => read(L, A, "pieceMaxGatesOf", [id, BigInt(i)]),
+  ]));
+  return pieces.map((p, i) => {
+    const d = per[3 * i];
+    return {
+      ...p,
+      delivery: { processor: d[0], circuitId: d[1], builder: d[2], gateCount: Number(d[3]), netlistHash: d[4], nextCase: Number(d[5]) },
+      table: per[3 * i + 1],
+      maxGates: Number(per[3 * i + 2]),
+    };
+  });
+}
+
+/** When refund opens for this order (unix seconds, BigInt) or null: the pieced rule for a pieced order. */
+function refundOpens(data) {
+  const o = data.order;
+  const i = info();
+  if (data.pieces?.length) return G.refundOpensAtPieced(o.status, o.deadline, i.grace, data.pieces.every((p) => P.pieceState(p, p.delivery) !== "none"));
+  return G.refundOpensAt(o.status, o.deadline, i.grace);
+}
+
 // Chain time, not the visitor's clock: the latest block's timestamp, moved on by the time since it was read.
 function chainNow(data) {
   return data.now + BigInt(Math.floor((performance.now() - (data.nowAt ?? performance.now())) / 1000));
@@ -1552,9 +1595,10 @@ function chainNow(data) {
 
 // Which gates are open at chain time t. When this changes the order view is drawn again, so "time left", the
 // deliver window, the check window and the refund button move on without a reload.
-function gateSig(o, t) {
+function gateSig(data, t) {
+  const o = data.order;
   const i = info();
-  const opens = G.refundOpensAt(o.status, o.deadline, i.grace);
+  const opens = refundOpens(data);
   return [t > o.deadline, t > o.deadline + i.grace, opens !== null && t >= opens].join();
 }
 
@@ -1570,12 +1614,12 @@ setInterval(async () => {
   const id = v.id;
   const key = state.netKey;
   try {
-    const before = gateSig(o, chainNow(v.data));
+    const before = gateSig(v.data, chainNow(v.data));
     const block = await state.pub.getBlock({ blockTag: "latest" });
     if (state.view !== v || v.id !== id || state.netKey !== key || v.busy) return;
     v.data.now = block.timestamp;
     v.data.nowAt = performance.now();
-    if (gateSig(o, v.data.now) !== before) renderOrder();
+    if (gateSig(v.data, v.data.now) !== before) renderOrder();
     else setText("#deadline-left", leftText(o, v.data.now));
   } catch {
     /* keep the last known time; the next tick tries again */
@@ -1629,7 +1673,8 @@ function renderOrder() {
   const i = info();
   const cases = T.caseCount(o.nIn, o.nState);
   box.setAttribute("data-status", String(o.status));
-  if (v.mode === "receipt") return renderReceipt(box, v, data);
+  if (v.mode === "receipt") return data.pieces?.length ? renderPiecedReceipt(box, v, data) : renderReceipt(box, v, data);
+  if (data.pieces?.length) return renderPiecedOrder(box, v, data);
   const you = (a) => (sameAddr(a, state.account) ? " (" + txt("tool.order.you") + ")" : "");
 
   const head = el("div", { class: "ov-head" },
@@ -2048,6 +2093,211 @@ function renderReceipt(box, v, data) {
   box.append(el("div", { class: "ov" }, head, el("div", { class: "ov-main" }, facts, tbox), side));
 }
 
+// ---------------------------------------------------------------- pieced orders (createPiecedOrder), read only
+// A pieced order has no table in tableOf and no delivery in deliveries: everything here comes from piecesOf,
+// pieceOf, pieceTableOf and pieceMaxGatesOf. Creating and delivering pieces through the page comes later; the
+// view says how it is done instead of offering the V0 deliver and check boxes.
+function pieceKindText(p) {
+  if (p.kind === P.KIND.Table) return txt("tool.pieces.kindTable");
+  const vars = { wa: p.widthA, wb: p.widthB, aLast: p.widthA - 1, bFirst: p.widthA, bLast: p.widthA + p.widthB - 1, nOut: p.nOut };
+  return txt(p.kind === P.KIND.Add ? "tool.pieces.kindAdd" : "tool.pieces.kindGe", vars);
+}
+
+function joinText(pieces) {
+  const a = pieces[0];
+  const b = pieces[1];
+  if (b.nIn === a.nOut) return txt("tool.pieces.joinNoExtra", { aLast: a.nIn - 1, aOut: a.nOut });
+  return txt("tool.pieces.joinExtra", { aLast: a.nIn - 1, aOut: a.nOut, aOutLast: a.nOut - 1, from: a.nIn, last: P.topInputs(pieces) - 1, bLast: b.nIn - 1 });
+}
+
+function pieceStateText(p) {
+  const st = P.pieceState(p, p.delivery);
+  const total = 2n ** BigInt(p.nIn);
+  if (st === "none") return txt("tool.pieces.stateNone");
+  if (st === "passed") return txt("tool.pieces.statePassed", { total: fmtInt(total) });
+  return txt("tool.pieces.stateChecking", { n: fmtInt(p.delivery.nextCase), total: fmtInt(total) });
+}
+
+function circuitText(d) {
+  return txt("tool.pieces.circuitVal", { id: d.circuitId.toString(), proc: d.processor, gates: fmtInt(d.gateCount) });
+}
+
+function pieceBox(p, i) {
+  const st = P.pieceState(p, p.delivery);
+  const box = el("div", { class: "box piece", id: "piece-" + i, "data-state": st }, el("h4", { text: txt("tool.pieces.heading", { i: i + 1 }) }));
+  box.append(el("dl", { class: "facts" },
+    fact("tool.pieces.kind", el("span", { class: "piece-kind", text: pieceKindText(p) }), true),
+    fact("tool.order.shape", el("span", { text: txt("tool.order.shapeVal", { nIn: p.nIn, nOut: p.nOut, cases: fmtInt(2n ** BigInt(p.nIn)) }) })),
+    fact("tool.order.maxGates", el("span", { class: "mono", text: p.maxGates ? fmtInt(p.maxGates) : txt("tool.order.noCap") })),
+    fact("tool.pieces.state", el("span", { class: "piece-state", text: pieceStateText(p) }), true),
+    st !== "none" ? fact("tool.pieces.circuit", el("span", { class: "mono", text: circuitText(p.delivery) }), true) : null));
+  return box;
+}
+
+function piecedIntro(pieces) {
+  const n = pieces.length;
+  return el("div", { class: "box", id: "pieces-intro" },
+    el("p", { id: "pieces-made-of", text: n === 1 ? txt("tool.pieces.madeOf1") : txt("tool.pieces.madeOfN", { n }) }),
+    n === 2 ? el("p", { class: "help", id: "pieces-join", text: joinText(pieces) }) : null,
+    n === 2 ? el("p", { class: "help", text: txt("tool.pieces.joinWhy") }) : null);
+}
+
+function renderPiecedOrder(box, v, data) {
+  const o = data.order;
+  const i = info();
+  const pieces = data.pieces;
+  box.setAttribute("data-view", "pieced");
+  const you = (a) => (sameAddr(a, state.account) ? " (" + txt("tool.order.you") + ")" : "");
+  const head = el("div", { class: "ov-head" },
+    el("h3", { text: txt("tool.order.title", { id: String(v.id) }) }),
+    el("span", { class: "badge s-" + o.status, id: "order-status", text: txt("tool.order.status." + o.status) }),
+    el("button", { type: "button", class: "btn btn-quiet btn-sm", text: txt("tool.order.refresh"), on: { click: () => loadOrder(v.id) } }),
+    o.status === 2 ? el("button", { type: "button", class: "btn btn-ghost btn-sm", id: "receipt-btn", text: txt("tool.receipt.view"), on: { click: () => openOrder(v.id, "receipt") } }) : null,
+    el("p", { class: "help", text: o.status === 0 ? txt("tool.pieces.statusHelp0") : txt("tool.order.statusHelp." + o.status) }),
+    v.lastAction ? el("p", { class: "msg " + (v.lastAction.err ? "is-err" : "is-ok"), role: "status", id: "last-action", text: txt(v.lastAction.key, v.lastAction.vars) }) : null);
+  const now = chainNow(data);
+  const payout = i.feeBps > 0 ? txt("tool.payout", { net: fmtAmount(G.payoutAfterFee(o.amount, i.feeBps)), symbol: i.symbol, pct: G.feePercent(i.feeBps) }) : null;
+  const facts = el("dl", { class: "facts" },
+    fact("tool.order.amount", el("span", {}, el("span", { class: "mono", text: fmtAmount(o.amount) + " " + i.symbol }),
+      payout ? el("span", { class: "sub", id: "order-payout", text: payout }) : null)),
+    fact("tool.order.deadline", el("span", {}, el("span", { class: "mono", text: fmtDate(o.deadline) }),
+      el("span", { class: "sub", id: "deadline-left", text: leftText(o, now) }))),
+    fact("tool.order.buyer", el("span", { class: "mono", text: o.buyer + you(o.buyer) }), true),
+    fact("tool.order.builder", el("span", { class: "mono", text: o.builder + you(o.builder) }), true),
+    fact("tool.order.shape", el("span", { text: txt("tool.pieces.shapeTop", { nIn: o.nIn, nOut: o.nOut }) }), true));
+  const main = el("div", { class: "ov-main" }, facts, piecedIntro(pieces), ...pieces.map((p, k) => pieceBox(p, k)));
+  const side = el("div", { class: "ov-side" });
+  if (o.status === 0) {
+    side.append(el("div", { class: "box", id: "pieces-how" }, el("p", { class: "help", text: txt("tool.pieces.howDeliver") })));
+    side.append(refundBox(o, now, data));
+  }
+  box.append(el("div", { class: "ov" }, head, main, side));
+}
+
+// keccak256(abi.encode(pieces, tables)), the contract's piecedHash: pieces as (uint8,uint8,uint8,uint8,uint8)[],
+// tables[i] = pieceTableOf(id, i).
+function piecedFingerprint(pieces) {
+  const V = state.viem;
+  const comps = ["kind", "nIn", "nOut", "widthA", "widthB"].map((name) => ({ name, type: "uint8" }));
+  return V.keccak256(V.encodeAbiParameters([{ type: "tuple[]", components: comps }, { type: "bytes[]" }], [
+    pieces.map((p) => ({ kind: p.kind, nIn: p.nIn, nOut: p.nOut, widthA: p.widthA, widthB: p.widthB })),
+    pieces.map((p) => p.table),
+  ]));
+}
+
+function renderPiecedReceipt(box, v, data) {
+  const o = data.order;
+  const i = info();
+  const pieces = data.pieces;
+  box.setAttribute("data-view", "receipt");
+  const head = el("div", { class: "ov-head" },
+    el("h3", { text: txt("tool.receipt.title", { id: String(v.id) }) }),
+    el("span", { class: "badge s-" + o.status, id: "order-status", text: txt("tool.order.status." + o.status) }),
+    el("button", { type: "button", class: "btn btn-quiet btn-sm", id: "receipt-refresh", text: txt("tool.order.refresh"), on: { click: () => loadOrder(v.id) } }),
+    el("button", { type: "button", class: "btn btn-ghost btn-sm", id: "open-order-btn", text: txt("tool.receipt.openOrder", { id: String(v.id) }), on: { click: () => openOrder(v.id, "order") } }));
+  if (o.status !== 2 || !data.receipt) {
+    box.append(el("div", { class: "ov" }, head, el("div", { class: "ov-main" }, el("p", { class: "msg", id: "receipt-none", text: txt("tool.receipt.notPaid", { id: String(v.id) }) }))));
+    return;
+  }
+  const r = data.receipt;
+  head.append(el("p", { class: "help", text: txt("tool.pieces.receiptHelp") }));
+  const fp = piecedFingerprint(pieces).toLowerCase();
+  const hashOk = fp === String(r.tableHash).toLowerCase() && fp === String(data.piecedHash).toLowerCase();
+  const single = pieces.length === 1;
+  const rows = [];
+  if (single) {
+    const rule = data.rule || {};
+    const ruleOk = !rule.error && sameAddr(rule.processor, r.processor) && rule.circuitId === r.circuitId;
+    rows.push(fact("tool.receipt.processor", el("span", { class: "mono", text: r.processor }), true),
+      fact("tool.receipt.circuitId", el("span", { class: "mono", text: r.circuitId.toString() })));
+    rows.push(fact("tool.receipt.ruleOf", el("span", { class: ruleOk ? "" : "bad", id: "receipt-rule", text: rule.error || txt(ruleOk ? "tool.receipt.ruleOk" : "tool.receipt.ruleBad", { id: String(v.id) }) }), true));
+  } else {
+    rows.push(el("div", { class: "wide" }, el("dt", { text: txt("tool.receipt.processor") }), el("dd", {}, el("span", { id: "receipt-nosingle", text: txt("tool.pieces.noSingle") }))));
+  }
+  rows.push(fact("tool.receipt.block", el("span", { class: "mono", text: fmtInt(r.blockNumber) })));
+  rows.push(fact("tool.receipt.tableHash", el("span", {}, el("span", { class: "mono", text: r.tableHash }),
+    el("span", { class: "sub" + (hashOk ? "" : " bad"), id: "receipt-hash", text: txt(hashOk ? "tool.pieces.hashOk" : "tool.pieces.hashBad", { id: String(v.id) }) })), true));
+  pieces.forEach((p, k) => rows.push(el("div", { class: "wide" }, el("dt", { text: txt("tool.pieces.pieceCircuit", { i: k + 1 }) }),
+    el("dd", {}, el("span", { class: "mono", id: "receipt-piece-" + k, text: circuitText(p.delivery) })))));
+  const facts = el("dl", { class: "facts", id: "receipt-facts" }, ...rows);
+  facts.append(fact("tool.order.shape", el("span", { text: txt("tool.pieces.shapeTop", { nIn: o.nIn, nOut: o.nOut }) }), true));
+  const main = el("div", { class: "ov-main" }, facts, piecedIntro(pieces), ...pieces.map((p, k) => pieceBox(p, k)));
+  const side = el("div", { class: "ov-side" }, piecedTryBox(o, pieces, data.labels, i));
+  box.append(el("div", { class: "ov" }, head, main, side));
+}
+
+// The joined rule as a free eth_call: run with gas for every piece's netlist read and hold (G.runPiecedGasLimit).
+// Same protections as tryBox / doRun: switches off while a call is out, an answer for another view, network or
+// switch setting is dropped, an answer is only shown when every byte came back, and a call too big for a public
+// node's free-call cap is not made at all.
+function piecedTryBox(o, pieces, labels, i) {
+  const v = state.view;
+  const n = o.nIn;
+  if (!v.tryBits || v.tryBits.length !== n) v.tryBits = new Array(n).fill(0);
+  const box = el("div", { class: "box", id: "try-box" }, el("h4", { text: txt("tool.receipt.tryHeading") }), el("p", { class: "help", text: txt("tool.pieces.tryHelp") }));
+  const body = el("tbody");
+  for (let k = 0; k < n; k++) {
+    const name = colHead(labels, k, n);
+    const bit = v.tryBits[k];
+    const b = el("button", { type: "button", class: "bit", "data-k": k, "aria-pressed": String(!!bit), "aria-label": txt("tool.receipt.cellLabel", { name, v: bit }), text: String(bit), disabled: !!v.busy });
+    b.addEventListener("click", () => {
+      v.tryBits[k] ^= 1;
+      v.tryResult = null;
+      renderOrder();
+    });
+    body.appendChild(el("tr", {}, el("th", { scope: "row" }, colHeadNode(labels, k, n)), el("td", {}, b)));
+  }
+  box.append(el("table", { class: "try-table" },
+    el("thead", {}, el("tr", {}, el("th", { scope: "col", text: txt("tool.receipt.colInput") }), el("th", { scope: "col", text: txt("tool.receipt.colValue") }))), body));
+  const gas = G.runPiecedGasLimit(i, pieces.map((p) => p.delivery.gateCount));
+  const fits = gas <= G.SIM_GAS_CAP;
+  const btn = el("button", { type: "button", class: "btn btn-primary", id: "run-btn", text: txt(v.busy === "run" ? "tool.receipt.running" : "tool.receipt.runBtn"), disabled: !fits || !!v.busy });
+  btn.addEventListener("click", () => doRunPieced(o, pieces));
+  box.append(btn);
+  if (!fits) box.append(el("p", { class: "msg is-err", id: "run-toobig", text: txt("tool.pieces.tooBig", { gas: fmtInt(gas) }) }));
+  const res = v.tryResult;
+  if (res) {
+    box.append(el("p", { class: "msg " + (res.err ? "is-err" : "is-ok"), role: res.err ? "alert" : "status", id: "run-result", text: res.text }));
+    if (res.check) box.append(el("p", { class: "msg " + (res.check.ok ? "is-ok" : "is-err"), id: "run-check", text: res.check.text }));
+  }
+  return box;
+}
+
+async function doRunPieced(o, pieces) {
+  const v = state.view;
+  const i = info();
+  const gas = G.runPiecedGasLimit(i, pieces.map((p) => p.delivery.gateCount));
+  if (gas > G.SIM_GAS_CAP) return;
+  const bits = v.tryBits.slice();
+  let x = 0n;
+  for (let k = 0; k < o.nIn; k++) if (bits[k]) x |= 1n << BigInt(k);
+  const inputs = T.toHex(P.packBig(x, o.nIn));
+  v.busy = "run";
+  v.tryResult = null;
+  renderOrder();
+  const key = state.netKey;
+  try {
+    const r = await state.pub.readContract({ address: net().lathe, abi: state.abi, functionName: "run", args: [v.id, inputs], gas });
+    if (state.view !== v || state.netKey !== key) return;
+    if (v.tryBits.join() !== bits.join()) return dropRun(v);
+    const outBytes = state.viem.hexToBytes(r);
+    if (outBytes.length !== Math.ceil(o.nOut / 8)) throw new Error("short answer");
+    const out = P.readBitsBig(outBytes, 0, o.nOut);
+    const bitsText = (val) => Array.from({ length: o.nOut }, (_, k) => `y${k}=${(val >> BigInt(k)) & 1n}`).join(" ");
+    const exp = P.joinExpected(pieces, pieces.map((p) => state.viem.hexToBytes(p.table)), x);
+    v.tryResult = {
+      text: txt("tool.pieces.result", { out: bitsText(out) }),
+      check: exp === out ? { ok: true, text: txt("tool.pieces.match", { c: x.toString() }) } : { ok: false, text: txt("tool.pieces.mismatch", { c: x.toString(), exp: bitsText(exp) }) },
+    };
+  } catch (e) {
+    if (state.view !== v || state.netKey !== key) return;
+    if (v.tryBits.join() !== bits.join()) return dropRun(v);
+    v.tryResult = { err: true, text: explain(e, { read: true, action: "run" }).text };
+  }
+  v.busy = false;
+  renderOrder();
+}
+
 // One row per input (its name as the row header), then the memory bit; each value is a 0/1 switch.
 // While a run is out the switches are off, so the answer always lands next to the inputs it was asked for; any
 // change to a switch afterwards clears the answer (doRun also drops an answer whose inputs no longer match).
@@ -2143,14 +2393,19 @@ function dropRun(v) {
   renderOrder();
 }
 
-function refundBox(o, now) {
+function refundBox(o, now, data = null) {
   const v = state.view;
   const i = info();
   const box = el("div", { class: "box", id: "refund-box" }, el("h4", { text: txt("tool.refund.heading") }));
-  const opens = G.refundOpensAt(o.status, o.deadline, i.grace);
+  const pieced = !!data?.pieces?.length;
+  const opens = pieced ? refundOpens(data) : G.refundOpensAt(o.status, o.deadline, i.grace);
+  if (pieced) box.append(el("p", { class: "help", id: "refund-rule", text: txt("tool.pieces.refundRule") }));
   let gate = null;
   if (opens !== null && now < opens) {
-    gate = txt(o.status === 1 ? "tool.refund.notYetChecking" : "tool.refund.notYet", { time: fmtDate(opens) });
+    const key = pieced
+      ? (opens > o.deadline + 1n ? "tool.pieces.refundNotYetAll" : "tool.pieces.refundNotYetUndelivered")
+      : (o.status === 1 ? "tool.refund.notYetChecking" : "tool.refund.notYet");
+    gate = txt(key, { time: fmtDate(opens) });
   } else if (!state.account) gate = txt("tool.wallet.needWallet");
   else if (!sameAddr(state.account, o.buyer)) gate = txt("tool.refund.onlyBuyer", { addr: short(o.buyer) });
   else if (wrongNetwork()) gate = txt("tool.wallet.wrongNet", { net: txt("tool.network." + net().key) });

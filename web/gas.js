@@ -130,6 +130,16 @@ export function refundOpensAt(status, deadline, grace) {
   return null;
 }
 
+/**
+ * Refund rule for a pieced order (LatheOrders.refund with pieces): only while Open (pieced orders never use
+ * Checking), when t > deadline and either some piece has no delivery or t > deadline + GRACE.
+ * `allDelivered`: every piece has a delivery now (being checked or passed). Times in unix seconds (BigInt).
+ */
+export function refundOpensAtPieced(status, deadline, grace, allDelivered) {
+  if (status !== 0) return null;
+  return allDelivered ? deadline + grace + 1n : deadline + 1n;
+}
+
 /** What the builder receives: the contract's fee is amount * feeBps / 10000, rounded down (LatheOrders._pay). */
 export function payoutAfterFee(amount, feeBps) {
   return amount - (amount * BigInt(feeBps)) / 10_000n;

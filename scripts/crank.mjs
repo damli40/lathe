@@ -7,11 +7,13 @@ import { pathToFileURL } from 'node:url';
 
 const HELP = `usage: node scripts/crank.mjs --lathe ADDR --order N --piece I --batch K --rpc URL
          (--account NAME | --keystore PATH) [--password-file PATH]
-         [--max-gas G] [--dry]
+         [--max-gas G] [--chain-id N] [--dry]
        local anvil only: --unlocked --from ADDR instead of a keystore
 
-  --batch K       cases per transaction (lowered if the gas limit for K cases would pass --max-gas)
+  --batch K       cases per transaction (lowered if the gas limit for K cases would pass --max-gas or the
+                  chain's block gas limit)
   --max-gas G     highest gas limit for one transaction (default 200000000; X Layer blocks hold 210M)
+  --chain-id N    stop before sending anything if the RPC is on another chain (X Layer: 196, testnet: 1952)
   --dry           read the order and print the plan (batches, gas limit per batch, worst-case cost); send nothing`;
 
 // Gas maths. Each case's eval gets exactly evalBudget(gateCount) gas, and the contract refuses to start a case
@@ -21,7 +23,9 @@ const HELP = `usage: node scripts/crank.mjs --lathe ADDR --order N --piece I --b
 const EVAL_BASE_GAS = 100_000n;
 const EVAL_GAS_PER_GATE = 15_000n;
 const GAS_RESERVE = 20_000n;
-const PER_CASE_OVERHEAD = 30_000n; // packing, compare, try/catch, memory: measured < 5,000 (evidence file)
+// Lathe's own work per case (packing, compare, try/catch, memory) was measured at about 7,500 gas
+// (evidence/2026-11-21-crank-anvil-run.md: ~169,500 used per case against a ~162,000 mock burn); 30,000 leaves room.
+const PER_CASE_OVERHEAD = 30_000n;
 const TX_BASE = 150_000n; // intrinsic gas, calldata, storage reads, events
 const PAY_BASE = 300_000n; // receipt, fee, transfer, events when the last batch pays the order
 const netlistGas = (bytes) => 30_000n + 70n * BigInt(bytes); // read + hash the whole netlist once (~12/byte measured)
@@ -39,11 +43,40 @@ export function batchGasLimit({ k, gates, netlistBytes, pays, allNetlistBytes = 
   return g;
 }
 
-/// The largest k <= want whose gas limit fits under maxGas (0 if not even one case fits).
+/// The largest k <= want whose gas limit fits under maxGas (0 if not even one case fits). maxGas is the smaller of
+/// --max-gas and the chain's block gas limit (see gasCeiling).
 export function fitBatch(want, opts, maxGas) {
   let k = want;
   while (k > 0 && batchGasLimit({ ...opts, k, pays: opts.paysAt(k) }) > maxGas) k--;
   return k;
+}
+
+/// The highest gas limit one transaction may ask for: --max-gas, but never above the block gas limit, since a
+/// transaction whose limit is above the block's can never be included.
+export function gasCeiling(maxGas, blockGasLimit) {
+  return blockGasLimit < maxGas ? blockGasLimit : maxGas;
+}
+
+/**
+ * What happened to the piece after a send that failed or whose result is unknown, judged from the piece as read
+ * again (`after`) against the piece before the send (`before`). Returns one of:
+ *   'paid'      the order is Paid (the transaction landed and finished the order);
+ *   'rejected'  the delivery was cleared or replaced (processor, circuit or netlist hash differ, or the cursor went
+ *               back): a transaction landed and rejected the piece;
+ *   'gone'      the order is no longer Open (Refunded) or the piece passed some other way;
+ *   'moved'     the cursor moved forward: the transaction landed, carry on;
+ *   'stuck'     nothing changed.
+ */
+export function judgeAfterFailure(before, after) {
+  if (after.status === 2) return 'paid';
+  if (after.status !== 0) return 'gone';
+  const cleared = /^0x0{40}$/i.test(after.proc);
+  const replaced = !cleared && (after.proc.toLowerCase() !== before.proc.toLowerCase() || after.circuitId !== before.circuitId
+    || after.netlistHash.toLowerCase() !== before.netlistHash.toLowerCase());
+  if (cleared || replaced || after.next < before.next) return 'rejected';
+  if (after.next >= after.total) return 'gone';
+  if (after.next > before.next) return 'moved';
+  return 'stuck';
 }
 
 function parseArgs(argv) {
@@ -64,6 +97,7 @@ function parseArgs(argv) {
       case '--keystore': a.keystore = v(); break;
       case '--password-file': a.passwordFile = v(); break;
       case '--max-gas': a.maxGas = BigInt(v()); break;
+      case '--chain-id': a.chainId = BigInt(v()); break;
       case '--dry': a.dry = true; break;
       case '--unlocked': a.unlocked = true; break;
       case '--from': a.from = v(); break;
@@ -100,6 +134,20 @@ function cast(args, { inherit = false } = {}) {
   return { ok: r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
 }
 
+/// cast's error text. With --json, cast send writes its error to stdout, not stderr, so both are shown. Neither
+/// can hold the keystore password: cast reads it from the prompt or the password file and never prints it.
+function castError(r) {
+  let out = r.out;
+  try {
+    // cast --json error shape: {"success":false,"errors":[{"message":"..."}]}; show the messages, not the JSON.
+    const j = JSON.parse(out);
+    if (Array.isArray(j.errors) && j.errors.length) out = j.errors.map((e) => e.message ?? JSON.stringify(e)).join('\n');
+  } catch {
+    /* not JSON: show it as it is */
+  }
+  return [r.err, out].filter(Boolean).join('\n') || '(cast printed nothing)';
+}
+
 function call(a, sig, ...params) {
   const r = cast(['call', a.lathe, sig, ...params.map(String), '--rpc-url', a.rpc]);
   if (!r.ok) die(`read failed: ${sig}\n${r.err}`);
@@ -110,7 +158,7 @@ function call(a, sig, ...params) {
 const fields = (out) => out.split('\n').map((l) => l.trim().split(/\s+/)[0]);
 
 function readState(a) {
-  const [proc, circuitId, , gates, , next] = fields(
+  const [proc, circuitId, , gates, netlistHash, next] = fields(
     call(a, 'pieceOf(uint256,uint256)(address,uint256,address,uint32,bytes32,uint32)', a.order, a.piece));
   const o = fields(call(a, 'orders(uint256)(address,address,uint96,uint64,uint32,uint8,uint8,uint8,uint8)', a.order));
   const piecesRaw = call(a, 'piecesOf(uint256)((uint8,uint8,uint8,uint8,uint8)[])', a.order);
@@ -122,7 +170,7 @@ function readState(a) {
     const [p, id] = fields(call(a, 'pieceOf(uint256,uint256)(address,uint256,address,uint32,bytes32,uint32)', a.order, i));
     return { proc: p, id };
   });
-  return { proc, circuitId, gates: Number(gates), next: Number(next), total: 2 ** nIn, status: Number(o[8]), deadline: Number(o[3]), all };
+  return { proc, circuitId, netlistHash, gates: Number(gates), next: Number(next), total: 2 ** nIn, status: Number(o[8]), deadline: Number(o[3]), all };
 }
 
 function netlistBytes(a, proc, id) {
@@ -134,8 +182,24 @@ function netlistBytes(a, proc, id) {
 
 const topic = (sig) => cast(['keccak', sig]).out.toLowerCase();
 
+/// Chain id and block gas limit, read once at start.
+function chainFacts(a) {
+  const id = cast(['chain-id', '--rpc-url', a.rpc]);
+  if (!id.ok) die(`could not read the chain id from ${a.rpc}\n${castError(id)}`);
+  const lim = cast(['block', 'latest', '--field', 'gasLimit', '--rpc-url', a.rpc]);
+  if (!lim.ok) die(`could not read the block gas limit from ${a.rpc}\n${castError(lim)}`);
+  return { chainId: BigInt(id.out), blockGasLimit: BigInt(lim.out.split(/\s+/)[0]) };
+}
+
 function main() {
   const a = parseArgs(process.argv.slice(2));
+  const chain = chainFacts(a);
+  console.log(`chain id ${chain.chainId}, block gas limit ${chain.blockGasLimit}`);
+  if (a.chainId !== undefined && a.chainId !== chain.chainId) {
+    die(`the RPC is on chain ${chain.chainId}, not --chain-id ${a.chainId}: stopping before anything is sent`);
+  }
+  const ceiling = gasCeiling(a.maxGas, chain.blockGasLimit);
+  const ceilingName = ceiling < a.maxGas ? `the block gas limit ${ceiling}` : `--max-gas ${a.maxGas}`;
   const T_REJECTED = topic('PieceRejected(uint256,uint256,uint256)');
   const T_PAID = topic('Paid(uint256,address,address,uint256)');
   let s = readState(a);
@@ -152,9 +216,12 @@ function main() {
     paysAt: (k) => s.next + k >= s.total, // a batch that finishes the piece may also pay the order
   };
   const want = Math.min(a.batch, s.total - s.next);
-  const k = fitBatch(want, opts, a.maxGas);
-  if (k === 0) die(`one case needs more than --max-gas ${a.maxGas} (budget ${evalBudget(s.gates)} per case)`);
-  if (k < want) console.log(`batch lowered from ${want} to ${k} so the gas limit stays under ${a.maxGas}`);
+  const k = fitBatch(want, opts, ceiling);
+  if (k === 0) {
+    const one = batchGasLimit({ ...opts, k: 1, pays: opts.paysAt(1) });
+    die(`one case needs a gas limit of ${one}, above ${ceilingName} (budget ${evalBudget(s.gates)} per case): this piece cannot be checked on this chain`);
+  }
+  if (k < want) console.log(`batch lowered from ${want} to ${k} so the gas limit stays under ${ceilingName}`);
 
   const remaining = s.total - s.next;
   const txs = Math.ceil(remaining / k);
@@ -183,17 +250,39 @@ function main() {
   const t0 = Date.now();
   let sent = 0;
   while (s.next < s.total) {
-    const kk = fitBatch(Math.min(k, s.total - s.next), opts, a.maxGas);
+    let kk = fitBatch(Math.min(k, s.total - s.next), opts, ceiling);
+    if (opts.paysAt(kk)) {
+      // This batch may pay the order, which reads every piece's netlist again. Another piece may have been
+      // delivered since the start (its netlist was 0 bytes then), so read the sizes again for this gas limit.
+      opts.netlistBytes = netlistBytes(a, s.proc, s.circuitId);
+      opts.allNetlistBytes = s.all.map((p) => netlistBytes(a, p.proc, p.id));
+      kk = fitBatch(kk, opts, ceiling);
+      if (kk === 0) die(`the last batch needs a gas limit above ${ceilingName} after re-reading the netlists; stopping`);
+      const total = opts.allNetlistBytes.reduce((x, y) => x + y, 0);
+      console.log(`last batch may pay: netlists read again (${total} bytes over ${opts.allNetlistBytes.length} piece(s))`);
+    }
     const limit = batchGasLimit({ ...opts, k: kk, pays: opts.paysAt(kk) });
     const r = cast(['send', a.lathe, 'checkPiece(uint256,uint256,uint256)', String(a.order), String(a.piece), String(kk),
       '--rpc-url', a.rpc, '--gas-limit', String(limit), '--json', ...wallet], { inherit: true });
     sent++;
     if (!r.ok) {
-      // Sending failed (RPC error, wrong password). Re-read before deciding: the transaction may have landed.
-      const before = s.next;
+      // Sending failed (RPC error, wrong password, wrong --from), or cast could not read the result. Say why, then
+      // re-read the whole piece before deciding: the transaction may have landed, and may have rejected the piece.
+      console.log(`cast send reported an error:\n${castError(r)}`);
+      const before = s;
       s = readState(a);
-      if (s.next === before) die(`cast send failed and no progress was made (${s.next}/${s.total}); stopping`);
-      console.log(`cast send reported an error but the check moved to ${s.next}/${s.total}; continuing`);
+      const what = judgeAfterFailure(before, s);
+      if (what === 'rejected') {
+        console.log(`Rejected: piece ${a.piece}'s delivery was cleared (a transaction landed and the circuit gave a wrong answer). The piece reopened; stopping.`);
+        process.exit(2);
+      }
+      if (what === 'paid') {
+        console.log(`order ${a.order} paid (the transaction landed although cast reported an error)`);
+        break;
+      }
+      if (what === 'gone') die(`the order is now ${['Open', 'Checking', 'Paid', 'Refunded'][s.status]} with piece ${a.piece} at ${s.next}/${s.total}; nothing left to check. Stopping.`);
+      if (what === 'stuck') die(`cast send failed and nothing changed (${s.next}/${s.total}); stopping`);
+      console.log(`the transaction landed anyway: check moved to ${s.next}/${s.total}; continuing`);
       continue;
     }
     let rc;

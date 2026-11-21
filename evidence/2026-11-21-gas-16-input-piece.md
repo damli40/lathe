@@ -10,7 +10,7 @@ So checking all 65,536 cases uses about **98 billion gas**, which is about **1.9
 
 The number of transactions is set by the per-case gas budget, not by the real cost. Lathe must hand each case 9.88M gas (100,000 + 15,000 × 652), about 6.6 times what the multiplier really uses. A transaction may only start a case if that much gas is left. If the batch size is sized so that it can never run short (`scripts/crank.mjs` does this), a 200M-gas transaction fits **19 cases**. That makes **3,450 transactions**, each one reserving about 92% of a 210M block.
 
-**What this decides:** a 16-input piece is affordable, but a 650-gate one means hours of cranking. A small comparator of about 70 gates (the two-of-three piece A) needs about **403 transactions** and about 0.22 OKB (an estimate from the per-gate figure, not measured). Use small formula circuits for 16- and 17-input pieces. The lever that would cut the transaction count is the per-gate budget, and it is not changed here (see "Not done").
+**What this decides:** a 16-input piece is affordable, but a 650-gate one means hours of cranking. A small comparator of about 70 gates (the two-of-three piece A) took **400 transactions** in the local crank run (`evidence/2026-11-21-crank-anvil-run.md`, mock circuits that burn the estimated ~162,000 gas per case of a 70-gate circuit), using 11.11B gas in total, about 0.22 OKB at 0.02 gwei. The transaction count is measured; the gas per case is an estimate from the per-gate figure, not a real 70-gate circuit. Use small formula circuits for 16- and 17-input pieces. The lever that would cut the transaction count is the per-gate budget, and it is not changed here (see "Not done").
 
 ## What was measured
 
@@ -29,7 +29,7 @@ forge test --match-path 'test/fork/PieceGas16.fork.t.sol' -vv
 
 The test also confirms that the multiplier's input layout is the formula-piece layout: a = input byte 0, b = input byte 1, outputs = a × b, all LSB first.
 
-**How the end-to-end figure was made.** No real 16-input `a >= b` circuit exists on chain. The test uses `MulCostPiece`, a stand-in GreaterOrEqual(8, 8) piece. Each case it calls the real multiplier with the same two input bytes, discards the product, and answers a >= b. It reports 652 gates, so Lathe gives it the real multiplier's budget. Lathe is deployed with a mock factory and mock token, because the real factory does not list the stand-in. The extra call layer makes the figure a little higher than a real 652-gate piece would be. The fixed cost per call (about 93,000 gas above one case, before the 21,000 intrinsic) was measured with a short stand-in netlist. A real piece also pays the ~56,000 netlist read.
+**How the end-to-end figure was made.** No real 16-input `a >= b` circuit exists on chain. The test uses `MulCostPiece`, a stand-in GreaterOrEqual(8, 8) piece. Each case it calls the real multiplier with the same two input bytes, discards the product, and answers a >= b. It reports 652 gates, so Lathe gives it the real multiplier's budget. Lathe is deployed with a mock factory and mock token, because the real factory does not list the stand-in. The stand-in adds a call layer, so one would expect its figure to be a little higher than a real 652-gate piece. It is not: the end-to-end marginal figure (1,491,971 per case) is about 14,000 gas (about 1%) below the multiplier's eval measured alone (mean 1,506,139). Why was not measured. Read both as about 1.5M per case. The fixed cost per call (about 93,000 gas above one case, before the 21,000 intrinsic) was measured with a short stand-in netlist. A real piece also pays the ~56,000 netlist read.
 
 ## Projection for 65,536 cases (GreaterOrEqual(8, 8) on a 652-gate circuit)
 
@@ -49,7 +49,7 @@ For comparison, a crank that sized batches from the measured 1.49M per case woul
 
 ## Limits
 
-- Gas per case depends on the circuit. These numbers are for the 652-gate multiplier's eval cost. A real comparator has far fewer gates. The 70-gate figures (~0.17M per case, 403 transactions, ~0.22 OKB) are estimates from the ~2,320 gas per real gate in `evidence/2026-11-20-eval-gas-budget.md`, not a measurement.
+- Gas per case depends on the circuit. These numbers are for the 652-gate multiplier's eval cost. A real comparator has far fewer gates. The 70-gate gas figures (~0.17M per case, ~0.22 OKB) are estimates from the ~2,320 gas per real gate in `evidence/2026-11-20-eval-gas-budget.md`, not a measurement of a real circuit. The 400 transactions for it were measured with mock circuits on a local anvil (`evidence/2026-11-21-crank-anvil-run.md`).
 - Measured on a fork, not in live transactions. Block inclusion was not tested: whether the sequencer accepts a steady stream of 192M-limit transactions, and how fast, is untested.
 - The gas price and block gas limit were read once.
 

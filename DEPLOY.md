@@ -52,7 +52,9 @@ It refuses to run on any chain except 1952.
 
 **It sends two extra transactions first.** `LatheOrders` is too big to fit in one contract with the next versions' room, so two parts of it live in separate contracts called linked libraries: `LatheChecks` (the rules checked when an order is created) and `LatheReads` (`run`, `runStep` and the piece join for paid orders). Neither holds money or can change an order. `forge` deploys both before `LatheOrders` and writes their addresses into its code. It uses the standard CREATE2 deployer (`0x4e59b44847b379578588920ca78fbf26c0b4956c`, present on X Layer testnet and mainnet when checked on 2026-11-21), so a library's address depends only on its compiled code: the same code gets the same address on every chain, and any change to `src/` (even a comment, since it changes the compiled metadata) gives a new one. If a library is already at that address, `forge` skips it. The addresses are in `broadcast/DeployTestnet.s.sol/1952/run-latest.json` under `libraries`.
 
-It prints six lines: `LATHE`, `USDT`, `FACTORY`, `PROCESSOR`, `XOR_ID` (1), `WRONG_ID` (2). Keep them.
+It prints: `LATHE`, `USDT`, `FACTORY`, `PROCESSOR`, `XOR_ID` (1), `WRONG_ID` (2), `TOGGLE_ID` (3), `WRONG_TOGGLE_ID` (4), `FORMULA_PROCESSOR`, `ADD22_ID` (1), `GE32_ID` (2), `GE32_WRONG_ID` (3), `GE66_ID` (4). Keep them.
+
+`FORMULA_PROCESSOR` is a second mock processor for pieced orders. Its circuits compute a formula instead of looking up a list of answers, all 4 gates: 1 = "a plus b" on two 2-bit numbers, 2 = "a is at least b" with a of 3 bits and b of 2, 3 = the same but wrong in case 5 (a = 5, b = 0), 4 = "a is at least b" on two 6-bit numbers (12 inputs, 4,096 cases, for the crank).
 
 **Optional, verify the source on OKLink** (needs an OKLink API key). Add these flags to the command above. `read -s` keeps the key off the screen and out of history:
 
@@ -82,6 +84,7 @@ Paste the addresses from step 3 into this command:
 
 ```sh
 LATHE=0x... USDT=0x... PROCESSOR=0x... XOR_ID=1 WRONG_ID=2 TOGGLE_ID=3 WRONG_TOGGLE_ID=4 \
+FORMULA_PROCESSOR=0x... ADD22_ID=1 GE32_ID=2 GE32_WRONG_ID=3 GE66_ID=4 \
 forge script script/Smoke.s.sol \
   --rpc-url https://testrpc.xlayer.tech/terigon \
   --account lathe-testnet --broadcast
@@ -97,8 +100,12 @@ What it does and what you should see:
 | (d) | Creates a memory order (1 input, 1 output, 1 memory bit, table `0x3c`) with input names `flip` and `mem`, delivers the honest toggle circuit 3 | `order id 4 status 2` (Paid in the same transaction) |
 | (e) | Creates a second memory order, then tries the wrong toggle circuit 4 | `deliver reverts WrongAnswer(3)` (simulated, not sent), `order id 5 status 0`. Case 3 is x0 = 1 with memory 1, where circuit 4 keeps the memory at 1 instead of 0 |
 | (f) | Reads the two paid orders (1 and 4): `receipts`, `ruleOf`, `labelsOf`, then `run` on all 4 XOR cases and `runStep` on all 4 toggle cases | `receipt + ruleOf ok for order 1` and `... order 4`, `labelsOf: (a) none, (d) flip, mem`, `run(a): ...`, `runStep(d): ...`. Any wrong answer stops the script with a `Smoke (f): ...` message |
+| (g) | Creates a two-piece order: piece 0 adds two 2-bit numbers (inputs x0 x1 and x2 x3), piece 1 asks "is that sum at least x4 x5". Delivers formula circuit 1 as piece 0 and circuit 2 as piece 1. Both are small, so each is checked inside its `deliverPiece` | `order id 6 status 2` (Paid by the second delivery) |
+| (h) | Creates the same two-piece order, delivers circuit 1 as piece 0 (passed), then tries the wrong circuit 3 as piece 1 | `deliverPiece reverts WrongAnswer(5)` (simulated, not sent), piece 0 still `16/16`, piece 1 not delivered, `order id 7 status 0` |
+| (i) | Reads order 6: `piecesOf`, `receipts`, `ruleOf`, then `run` on all 64 inputs | receipt processor 0 (a two-piece order has no single circuit), fingerprint = `piecedHash`, `ruleOf` reverts `NoSingleCircuit`, every `run` answer = (x0x1 + x2x3) >= x4x5 with each number lowest bit first (inputs where bit order matters are named in the log) |
+| (j) | Creates a one-piece order "a is at least b" on two 6-bit numbers (12 inputs, 4,096 cases) and delivers circuit 4. That is too many cases to check inside the delivery, so it stays at 0/4096 | `order id 8 status 0` and a `node scripts/crank.mjs ... --order 8 ...` command to check it (see below) |
 
-Every transaction (orders 1 to 5 and the two deliveries) is sent before the simulated wrong deliveries in (b) and (e). A pranked call from your account uses up one of its nonces in forge's simulation, so a transaction queued after it went out with a nonce the chain skipped (seen on the local anvil run: "provider nonce is still behind expected nonce").
+Every transaction (orders 1 to 8 and their deliveries) is sent before the simulated wrong deliveries in (b), (e) and (h). A pranked call from your account uses up one of its nonces in forge's simulation, so a transaction queued after it went out with a nonce the chain skipped (seen on the local anvil run: "provider nonce is still behind expected nonce").
 
 The (f) reads and the `run` / `runStep` calls are free reads that forge runs in its simulation of the same transactions; they are never sent. `run` and `runStep` get an explicit 1,000,000 gas: like `check`, they refuse (`InsufficientGasForCase`) unless they can give the circuit its whole per-case budget. To confirm on chain afterwards:
 
@@ -120,9 +127,20 @@ Order 2's 1 mUSDT can also be refunded with the same command and id 2, but only 
 
 **Where to paste the results:** create `evidence/2026-11-2x-testnet-v0.md` (use the real date) with the six addresses from step 3 and every transaction hash. The hashes are in `broadcast/DeployTestnet.s.sol/1952/run-latest.json` and `broadcast/Smoke.s.sol/1952/run-latest.json` (field `hash`), plus the `cast send` outputs for the refund and the optional failed delivery. The `broadcast/` folder is git-ignored, so copy the hashes into the evidence file. Add a line to `evidence/README.md`. Say in the file that testnet ran on mocks.
 
-Every order must name its builder (`createOrder` reverts `BuilderRequired` for the zero address). The smoke run names the broadcasting account, which also owns the four mock circuits.
+Every order must name its builder (`createOrder` reverts `BuilderRequired` for the zero address). The smoke run names the broadcasting account, which also owns the mock circuits.
 
-All six steps must behave as described before mainnet.
+**(j) on testnet: the crank.** Order 8 is there so `scripts/crank.mjs` can be tried on a public chain. Run the command (j) printed, from the repo folder, with your testnet keystore. It looks like this:
+
+```sh
+node scripts/crank.mjs --lathe <LATHE> --order 8 --piece 0 --batch 1000 \
+  --rpc https://testrpc.xlayer.tech/terigon --chain-id 1952 --account lathe-testnet --password-file <path>
+```
+
+`--password-file` is a file only you can read (`chmod 600`) holding the keystore password; delete it after the run. Without it cast asks for the password on every transaction (about 5 here). Add `--dry` first to see the plan and the worst-case cost without sending anything. On the local anvil run the crank lowered the batch to 940 cases (gas limit 199,970,820 under the 200M default), sent 5 transactions, and the last one paid order 8. Expect `order 8 paid`.
+
+All ten steps must behave as described before mainnet.
+
+With the pieced steps (g) to (j) (2026-11-21, local anvil, chain id 1952, block gas limit 210M): order 6 Paid, order 7 Open with piece 0 at 16/16 and piece 1 not delivered, order 8 Open at 0/4096, `run(6, 0x01)` = `0x01`, `run(6, 0x20)` = `0x00`, `run(6, 0x13)` = `0x01` by `cast call --gas-limit 2000000`, and the printed crank command (with `--rpc` pointed at the anvil and `--unlocked --from` instead of a keystore) checked order 8 to Paid in 5 transactions.
 
 After the libraries split (2026-11-21), `DeployTestnet.s.sol` then `Smoke.s.sol` ran again on a local anvil (chain id 1952): the broadcast held the two library deploys (CREATE2) before the mocks and `LatheOrders`, and the smoke run gave the same results. `Deploy.s.sol` was dry-run on a mainnet fork (`--fork-url`, nothing sent): three transactions, the two libraries and `LatheOrders`.
 

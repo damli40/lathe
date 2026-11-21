@@ -5,6 +5,7 @@ import {Script, console2} from "forge-std/Script.sol";
 import {LatheOrders} from "../src/LatheOrders.sol";
 import {MockFactory, MockProcessor} from "../test/mocks/MockProcessor.sol";
 import {MockUSDT} from "../test/mocks/MockUSDT.sol";
+import {FormulaProcessor} from "../test/mocks/FormulaProcessor.sol";
 
 /// @notice X Layer TESTNET (chain 1952) deploy. TapeOut and USDT do not exist on testnet
 /// (evidence/2026-11-20-preflight.md, section 5), so this deploys stand-ins:
@@ -15,7 +16,16 @@ import {MockUSDT} from "../test/mocks/MockUSDT.sol";
 ///       circuit 3 = honest toggle with one memory bit: 1 input, 1 output, 1 memory bit, 4 gates. Case c has
 ///         x0 = c & 1 and memory s = c >> 1; new memory = s XOR x0, output = new memory (table 0x3c);
 ///       circuit 4 = the same toggle, wrong in case 3 only (x0 = 1, s = 1: new memory 1 instead of 0);
-///   - LatheOrders pointing at the mock factory and MockUSDT, fee 1% to the deployer.
+///   - FormulaProcessor (mock circuits that compute a + b or a >= b, test/mocks/FormulaProcessor.sol), registered with
+///     the mock factory, with four circuits owned by the deployer, all 4 gates (budget 160,000 gas per case), for
+///     pieced orders (a and b are read LSB first: a = the low widthA input bits, b = the next widthB bits):
+///       formula circuit 1 = Add(2, 2): 4 inputs, 3 outputs (a + b);
+///       formula circuit 2 = GreaterOrEqual(3, 2): 5 inputs, 1 output (a >= b);
+///       formula circuit 3 = the same GreaterOrEqual(3, 2), wrong in case 5 only (a = 5, b = 0: answers 0);
+///       formula circuit 4 = GreaterOrEqual(6, 6): 12 inputs, 4,096 cases, too many to check inside one delivery,
+///         so it is checked with scripts/crank.mjs (Smoke.s.sol prints the command);
+///   - LatheOrders pointing at the mock factory and MockUSDT, fee 1% to the deployer. forge first deploys
+///     LatheOrders' two linked libraries, LatheChecks and LatheReads (see DEPLOY.md).
 /// This proves the order contract's own logic only. Real TapeOut circuits are proven by the fork tests.
 /// The mocks reuse test/mocks so there is one copy of them. Their setters have no access control: fine for a
 /// throwaway testnet, never for mainnet. Logs only the deployed addresses.
@@ -24,6 +34,12 @@ contract DeployTestnet is Script {
     uint256 public constant WRONG_ID = 2;
     uint256 public constant TOGGLE_ID = 3;
     uint256 public constant WRONG_TOGGLE_ID = 4;
+    uint256 public constant ADD22_ID = 1; // on the FormulaProcessor
+    uint256 public constant GE32_ID = 2;
+    uint256 public constant GE32_WRONG_ID = 3;
+    uint256 public constant GE66_ID = 4;
+    uint256 public constant GE32_WRONG_CASE = 5;
+    uint32 public constant FORMULA_GATES = 4;
     uint16 public constant TESTNET_FEE_BPS = 100;
     uint256 public constant MINT = 1_000e6;
 
@@ -73,6 +89,14 @@ contract DeployTestnet is Script {
         processor.setOuts(WRONG_TOGGLE_ID, tog);
         processor.setNewStates(WRONG_TOGGLE_ID, wrongState);
 
+        FormulaProcessor formula = new FormulaProcessor();
+        factory.setCPU(address(formula), true);
+        formula.setCircuit(ADD22_ID, deployer, true, 2, 2, FORMULA_GATES);
+        formula.setCircuit(GE32_ID, deployer, false, 3, 2, FORMULA_GATES);
+        formula.setCircuit(GE32_WRONG_ID, deployer, false, 3, 2, FORMULA_GATES);
+        formula.setWrongAt(GE32_WRONG_ID, GE32_WRONG_CASE);
+        formula.setCircuit(GE66_ID, deployer, false, 6, 6, FORMULA_GATES);
+
         LatheOrders lathe = new LatheOrders(address(factory), address(usdt), deployer, TESTNET_FEE_BPS);
         usdt.mint(deployer, MINT);
         vm.stopBroadcast();
@@ -85,5 +109,10 @@ contract DeployTestnet is Script {
         console2.log("WRONG_ID", WRONG_ID);
         console2.log("TOGGLE_ID", TOGGLE_ID);
         console2.log("WRONG_TOGGLE_ID", WRONG_TOGGLE_ID);
+        console2.log("FORMULA_PROCESSOR", address(formula));
+        console2.log("ADD22_ID", ADD22_ID);
+        console2.log("GE32_ID", GE32_ID);
+        console2.log("GE32_WRONG_ID", GE32_WRONG_ID);
+        console2.log("GE66_ID", GE66_ID);
     }
 }

@@ -24,7 +24,8 @@ Opening `index.html` as a file does not work: ES modules need http.
 | `i18n.pitch.js` | Pitch copy (owned by the page owner, not edited here). |
 | `config.js` | Network settings. Mainnet goes live by filling in one address: `NETWORKS.mainnet.lathe`. |
 | `table.js` | Truth-table encoder and decoder, the same rule as `src/TableLib.sol`. Pure functions. |
-| `gas.js` | Gas limits, inline-check rule, amount parsing. Pure functions. |
+| `gas.js` | Gas limits, inline-check rule, refund rules, amount parsing. Pure functions. |
+| `pieces.js` | Pieced orders: each piece's expected answer and the joined rule, the same layout as `src/FormulaLib.sol` and `createPiecedOrder`. Pure functions, BigInt. |
 | `abi.json` | `LatheOrders` ABI, extracted from `out/LatheOrders.sol/LatheOrders.json`. |
 | `logo.svg` | Copy of `assets/logo.svg`; shown large in the hero when the figure is missing. |
 | `figure.js`, `figure.css` | The hero drawing, built separately. Loaded only if present; the page works without them. |
@@ -66,13 +67,31 @@ Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mon
 - Receipt view, `?receipt=N`: needs no wallet. It shows what the contract wrote at payout (processor, circuit,
   table fingerprint, block), checks the fingerprint against the stored table and shape (the contract hashes
   `abi.encodePacked(nIn, nOut, nState, table)`) and `ruleOf` against the receipt, and lets a visitor run the paid circuit (`run`, or `runStep` with memory) as a free `eth_call`. The call asks for
-  `RUN_OVERHEAD + netlist + one case's hold` gas (`gas.js`). If that is above the 48M the page keeps under the
+  `(RUN_OVERHEAD + netlist + one case's hold) x 64/63` gas (`gas.js`; the 64/63 is for the hop into the linked library `LatheReads`, which gets 63/64 of the gas). If that is above the 48M the page keeps under the
   public node's cap, the page says so and does not call. If a node gives the call less gas anyway, the contract
   reverts `InsufficientGasForCase` and the page shows that as an error. It never shows an answer it did not get
   in full. While a call is out the 0/1 switches are off; an answer that comes back after the view changed (reload,
   another order, another network) or for switches that no longer match is dropped, and any change to a switch
   clears the shown answer. The deliver box's processor and circuit boxes are off the same way while a read-out
   or a delivery is out.
+- Pieced orders (`createPiecedOrder`, found with `piecesOf`): read only for now; creating and delivering pieces
+  through the page comes later.
+  - `?order=N` says how many pieces the order has and how they join (piece 2 gets piece 1's outputs in its low
+    inputs, then the order's remaining inputs). Each piece shows its rule in plain words (a table, "a is at least b"
+    or "a plus b" with the bit widths and which piece inputs are a and b, lowest bit first), its inputs and outputs,
+    its own gate cap (`pieceMaxGatesOf`), and its state from `pieceOf`: not delivered, being checked (n of 2^nIn),
+    or passed. A rejected piece shows as not delivered, because the contract clears its delivery. There is no deliver
+    or check box; the page says pieces are delivered with `deliverPiece` and checked with `checkPiece` (the crank
+    script, `scripts/README.md`). The refund box follows `refund()` for pieced orders: only while Open, right after
+    the deadline while some piece has no delivery, otherwise one day after the deadline.
+  - `?receipt=N` checks the fingerprint the same way the contract makes it, `keccak256(abi.encode(pieces, tables))`,
+    against both the receipt and `piecedHash(N)`, and lists each piece's circuit. A 2-piece order has no single
+    circuit: the page says so, never shows the receipt's zero processor, and does not call `ruleOf` (it reverts
+    `NoSingleCircuit` by design). A 1-piece order names its circuit and is checked with `ruleOf` like a V0 order.
+    "Try the rule" calls `run` with gas for every piece's netlist read and full hold, times 64/63 for the library
+    hop (`runPiecedGasLimit`), and compares the answer with the join worked out in `pieces.js`. If that gas is
+    above the 48M the page keeps under the public node's cap, it says it cannot run it and does not call. The
+    same stale-answer rules as the V0 run apply.
 - A network with no contract address (mainnet today) shows "Not on mainnet yet" for every link (`?receipt=N`,
   `?order=N`, the create form) and nothing that says it is loading.
 - Claim fees is left out on purpose: `claimFees()` sends fees to the fixed fee recipient, so it is no use to a visitor.
@@ -122,6 +141,18 @@ node web/test/memory.mjs
 #    without it inside <bdi> and refused on the form; mainnet with no address shows the notice, never "Loading"
 node web/test/receipt.mjs
 ```
+
+```sh
+# 9. Pieced orders on a local anvil, through the 50M-cap proxy, no wallet needed for the views: a paid two-piece
+#    order (Add(2,2) then GreaterOrEqual(3,2)): pieces, join, receipt fingerprint = piecedHash, "no single circuit",
+#    run on inputs where bit order matters; a piece mid-check (100 of 4,096) past its deadline with every piece
+#    delivered (refund waits for the grace day); a rejected piece (shown as not delivered); a piece never delivered
+#    past the deadline (refund open); a paid 1-piece order (ruleOf, run); a paid order of 1,600-gate pieces (the page
+#    says it cannot run it). Checks that no V0 text appears: table mismatch, zero address, "no delivery", deliver box
+node web/test/pieces.mjs
+```
+
+`node --test web/test/` also runs `pieces.test.mjs`: the join and piece answers, and the pieced refund rule.
 
 The browser tests turn off the page's CSP (`bypassCSP`) only so the testnet or mainnet entry can point at
 `127.0.0.1`; `readonly.mjs` and `shots.mjs` run with the real CSP. Forge output for the tests goes to a temp folder,

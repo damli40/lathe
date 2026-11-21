@@ -55,13 +55,18 @@ contract LatheOrders is ReentrancyGuard {
         uint32 nextCase; // the next case check will run
     }
 
-    /// @notice What was paid for, written once at payout: which circuit, the hash of the table it matched, and
-    /// the block. Never changed afterwards. (Named PaidReceipt because Solidity forbids a struct and the Receipt
-    /// event sharing one name; the event name is the one in the ABI.)
+    /// @notice What was paid for, written once at payout (_payOut): which circuit, a fingerprint of the rule it
+    /// matched, and the block. Never changed afterwards. (Named PaidReceipt because Solidity forbids a struct and
+    /// the Receipt event sharing one name; the event name is the one in the ABI.)
+    /// - V0-V2 order: the delivered circuit, and tableHash = keccak256(abi.encodePacked(nIn, nOut, nState,
+    ///   tableOf[orderId])) (see _pay).
+    /// - Pieced order: tableHash = piecedHash(orderId) = keccak256(abi.encode(pieces, tables)). A 1-piece order
+    ///   names its piece's circuit. A 2-piece order has no single circuit, so processor and circuitId are 0; its
+    ///   circuits are in pieceOf(orderId, i).
     struct PaidReceipt {
         address processor;
         uint256 circuitId;
-        bytes32 tableHash; // keccak256(abi.encodePacked(nIn, nOut, nState, tableOf[orderId])), see _writeReceipt
+        bytes32 tableHash;
         uint64 blockNumber;
     }
 

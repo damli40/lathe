@@ -144,10 +144,70 @@
  },
  {
   "type": "function",
+  "name": "MAX_FORMULA_BITS",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "MAX_PIECES",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
   "name": "check",
   "inputs": [
    {
     "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxCases",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "done",
+    "type": "bool",
+    "internalType": "bool"
+   },
+   {
+    "name": "passed",
+    "type": "bool",
+    "internalType": "bool"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "checkPiece",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "pieceIndex",
     "type": "uint256",
     "internalType": "uint256"
    },
@@ -283,6 +343,82 @@
  },
  {
   "type": "function",
+  "name": "createPiecedOrder",
+  "inputs": [
+   {
+    "name": "pieces",
+    "type": "tuple[]",
+    "internalType": "struct Piece[]",
+    "components": [
+     {
+      "name": "kind",
+      "type": "uint8",
+      "internalType": "enum PieceKind"
+     },
+     {
+      "name": "nIn",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "nOut",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "widthA",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "widthB",
+      "type": "uint8",
+      "internalType": "uint8"
+     }
+    ]
+   },
+   {
+    "name": "tables",
+    "type": "bytes[]",
+    "internalType": "bytes[]"
+   },
+   {
+    "name": "amount",
+    "type": "uint96",
+    "internalType": "uint96"
+   },
+   {
+    "name": "deadline",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
+    "name": "builder",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "maxGates",
+    "type": "uint32[]",
+    "internalType": "uint32[]"
+   },
+   {
+    "name": "labels",
+    "type": "bytes32[]",
+    "internalType": "bytes32[]"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
   "name": "createStatefulOrder",
   "inputs": [
    {
@@ -400,6 +536,34 @@
   "inputs": [
    {
     "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "processor",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "deliverPiece",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "pieceIndex",
     "type": "uint256",
     "internalType": "uint256"
    },
@@ -619,6 +783,168 @@
     "name": "status",
     "type": "uint8",
     "internalType": "enum LatheOrders.Status"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "pieceMaxGatesOf",
+  "inputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "pieceOf",
+  "inputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "processor",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "builder",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "gateCount",
+    "type": "uint32",
+    "internalType": "uint32"
+   },
+   {
+    "name": "netlistHash",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   },
+   {
+    "name": "nextCase",
+    "type": "uint32",
+    "internalType": "uint32"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "pieceTableOf",
+  "inputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes",
+    "internalType": "bytes"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "piecedHash",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bytes32",
+    "internalType": "bytes32"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "piecesOf",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple[]",
+    "internalType": "struct Piece[]",
+    "components": [
+     {
+      "name": "kind",
+      "type": "uint8",
+      "internalType": "enum PieceKind"
+     },
+     {
+      "name": "nIn",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "nOut",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "widthA",
+      "type": "uint8",
+      "internalType": "uint8"
+     },
+     {
+      "name": "widthB",
+      "type": "uint8",
+      "internalType": "uint8"
+     }
+    ]
    }
   ],
   "stateMutability": "view"
@@ -898,6 +1224,81 @@
  },
  {
   "type": "event",
+  "name": "PieceDelivered",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "pieceIndex",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "processor",
+    "type": "address",
+    "indexed": false,
+    "internalType": "address"
+   },
+   {
+    "name": "circuitId",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "PiecePassed",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "pieceIndex",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "PieceRejected",
+  "inputs": [
+   {
+    "name": "orderId",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "pieceIndex",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "caseIndex",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
   "name": "Receipt",
   "inputs": [
    {
@@ -978,6 +1379,16 @@
  },
  {
   "type": "error",
+  "name": "BadPiece",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "BadPieceCount",
+  "inputs": []
+ },
+ {
+  "type": "error",
   "name": "BuilderRequired",
   "inputs": []
  },
@@ -1013,7 +1424,17 @@
  },
  {
   "type": "error",
+  "name": "NoSingleCircuit",
+  "inputs": []
+ },
+ {
+  "type": "error",
   "name": "NoSuchOrder",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NoSuchPiece",
   "inputs": []
  },
  {
@@ -1049,6 +1470,11 @@
  {
   "type": "error",
   "name": "NotProcessor",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "PieceAlreadyPassed",
   "inputs": []
  },
  {
@@ -1126,6 +1552,11 @@
  {
   "type": "error",
   "name": "WrongLabelCount",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "WrongOrderKind",
   "inputs": []
  },
  {
