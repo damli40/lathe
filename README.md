@@ -79,7 +79,7 @@ Since tested: the order contract calls a circuit the builder picks at delivery, 
 
 - A table covers at most 6 inputs. Bigger rules use pieces: up to 8 with listed wires (two without), each either a table of up to 6 inputs or one of two formulas ("a is at least b", "a plus b") of up to 17 inputs; an order has at most 64 inputs and 64 outputs. Wires cannot carry the constants 0 and 1. The order page shows wired orders but cannot create them yet.
 - Who can change the circuit runner: the processor factory is owned by a 3-of-5 multisig and is not sealed; the circuit beacon's owner is the zero address (read-only check, Nov 15 2026). We have not audited every upgrade path, so Lathe pins and inspects the exact processor before any order takes money.
-- Lathe takes a fee on each paid order. The rate is fixed when the contract is deployed, at most 5%, and is not chosen yet.
+- Lathe takes a fee on each paid order. The rate will be 2% of each paid order, fixed when the contract is deployed (the contract refuses anything above 5%).
 - A memory order takes exactly one memory bit. Circuits with 2 or more memory bits cannot be ordered.
 - The only big rule built and costed so far is the daily cap ([examples/daily-cap.json](examples/daily-cap.json)). Bigger rules in view, such as a payee check of about 33 inputs, have not been built or tested.
 - Every order names its builder. Open orders, where any builder may deliver, come after Dec 7: an open order lets anyone mint a copy of the honest builder's circuit, or wrap it, and deliver first.
