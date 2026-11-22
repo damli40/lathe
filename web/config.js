@@ -4,7 +4,9 @@
 // contract. `token`, `factory` and `processor` below are only checks and form defaults: after any deploy or
 // redeploy, run `node web/test/config-live.mjs`, which fails if they no longer match the contract.
 
-export const VIEM_URL = "https://esm.sh/viem@2.21.0";
+// The single-file build: one request of about 77 KB compressed. The plain "https://esm.sh/viem@2.21.0" entry
+// loads about 280 separate files, which took 30 seconds on a slow 3G connection (measured 2026-11-22).
+export const VIEM_URL = "https://esm.sh/viem@2.21.0/es2022/viem.bundle.mjs";
 
 export const NETWORKS = {
   testnet: {
