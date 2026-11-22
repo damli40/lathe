@@ -114,7 +114,7 @@ Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mon
     hop (`runPiecedGasLimit`), and compares the answer with the join worked out in `pieces.js`. If that gas is
     above the 48M the page keeps under the public node's cap, it says it cannot run it and does not call. The
     same stale-answer rules as the V0 run apply.
-- A network with no contract address (mainnet today) shows "Not on mainnet yet" for every link (`?receipt=N`,
+- A network with no contract address (mainnet before Nov 22, 2026; now only in tests) shows "Not on mainnet yet" for every link (`?receipt=N`,
   `?order=N`, the create form) and nothing that says it is loading.
 - Claim fees is left out on purpose: `claimFees()` sends fees to the fixed fee recipient, so it is no use to a visitor.
 - Explorer links: none. When checked on 2026-11-21, neither OKLink nor the OKX explorer resolved a known chain-1952

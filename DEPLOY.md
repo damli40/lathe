@@ -162,6 +162,8 @@ Checked end to end on a local anvil (chain id 1952, `DeployTestnet.s.sol` then `
 
 ## 5. Mainnet
 
+**Done on 2026-11-22.** `LatheOrders` is at `0x5218a5f49f816386459DdeC53EB03d9CbdFDEBD0`; the record is [evidence/2026-11-22-mainnet-deploy.md](evidence/2026-11-22-mainnet-deploy.md). The steps below are kept as the record of how it was done. Two things turned out different from what this section first said: the deploy was sent without the `--verify` flags, and OKLink then verified all four contracts through `forge verify-contract` **with no API key** (leave out `--etherscan-api-key`; add `--chain 196`, the `--libraries` flags from step 3, and for `LatheOrders` the `--constructor-args`).
+
 Use a **separate** keystore for mainnet, never the testnet one:
 
 ```sh

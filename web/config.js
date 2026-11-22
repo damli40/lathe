@@ -32,7 +32,7 @@ export const NETWORKS = {
     chainName: "X Layer",
     rpc: "https://rpc.xlayer.tech",
     nativeCurrency: { name: "OKB", symbol: "OKB", decimals: 18 },
-    lathe: null, // not deployed yet: fill in after `forge script script/Deploy.s.sol` (DEPLOY.md section 5)
+    lathe: "0x5218a5f49f816386459DdeC53EB03d9CbdFDEBD0", // deployed 2026-11-22, block 76593111 (evidence/2026-11-22-mainnet-deploy.md)
     token: "0x779Ded0c9e1022225f8E0630b35a9b54bE713736", // USD₮0, 6 decimals
     factory: "0x1f09DAeFA827f02CBb40967cc91b259763760761", // TapeOut processor factory
     processor: null, // builders type their own processor

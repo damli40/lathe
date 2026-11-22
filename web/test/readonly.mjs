@@ -1,8 +1,9 @@
 // Read-only against the live X Layer testnet contract, no wallet installed: orders 1, 2, 3 from the smoke run
-// (evidence/2026-11-21-testnet-case-gas.md) must show Paid, Open, Refunded. Also checks the mainnet "not deployed" state.
+// (evidence/2026-11-21-testnet-case-gas.md) must show Paid, Open, Refunded. Also checks that mainnet opens on the deployed contract (footer address, no "not deployed" notice).
 // Only eth_call / eth_getBlock reads go to the public RPC. Run from the repo root: node web/test/readonly.mjs
 import { serve, playwright, assert } from "./lib.mjs";
 import { waitStatus, statusText } from "./flows.mjs";
+import { NETWORKS } from "../config.js";
 
 const want = { 1: "Paid", 2: "Open", 3: "Refunded" };
 let browser;
@@ -30,9 +31,11 @@ try {
   const wallet = await page.locator("#wallet-status").textContent();
   assert(/No wallet found/.test(wallet), `wallet line: "${wallet}"`);
   await page.goto(`${server.url}?net=mainnet&lang=en`);
-  await page.waitForSelector("#tool-notice:not([hidden]) h3");
-  const notice = await page.locator("#tool-notice h3").textContent();
-  assert(notice === "Not on mainnet yet", `mainnet notice: "${notice}"`);
+  await page.waitForFunction(() => /X Layer mainnet/.test(document.querySelector("#tool-sub")?.textContent || ""));
+  await page.waitForTimeout(1500);
+  assert(!/Not on mainnet yet/.test(await page.locator("#order").textContent()), "mainnet no longer says it is not deployed");
+  const foot = (await page.locator("#foot-mainnet").textContent()).trim();
+  assert(foot === NETWORKS.mainnet.lathe && /^0x[0-9a-fA-F]{40}$/.test(foot), `footer shows the mainnet contract: "${foot}"`);
   assert(errors.length === 0, "no page errors" + (errors.length ? ": " + errors.join(" | ") : ""));
   console.log("READONLY PASS: live testnet orders 1, 2, 3 = Paid, Open, Refunded with no wallet");
 } catch (e) {

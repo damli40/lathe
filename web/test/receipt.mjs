@@ -16,7 +16,7 @@
 //       are off while "Read circuit" is out;
 //   (i) names are bytes: "x1)" + U+202E (right-to-left override) is shown as "x1)" inside <bdi>, then "(x0)"
 //       outside it, with no direction control left on the page; the create form refuses such a name;
-//   (j) mainnet has no contract address: ?receipt=1, ?order=1 and the create form show "Not on mainnet yet" and
+//   (j) a network with no contract address (mainnet with its address blanked): ?receipt=1, ?order=1 and the create form show "Not on mainnet yet" and
 //       nothing says it is loading.
 // Run from the repo root: node web/test/receipt.mjs
 import { execFileSync } from "node:child_process";
@@ -217,9 +217,10 @@ try {
   assert((await colTh.textContent()) === "x1) (x0)" && (await colTh.locator("bdi").count()) === 1, `column header: "${await colTh.textContent()}"`);
   assert(!/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/.test(await vp.locator("#order-view").textContent()), "no direction control left in the view");
 
-  console.log("(j) mainnet has no contract address");
+  console.log("(j) a network with no contract address");
   const mctx = await browser.newContext({ bypassCSP: true, viewport: { width: 1440, height: 900 } });
-  await mctx.addInitScript({ content: cfg });
+  // Mainnet has a real address since 2026-11-22, so this context blanks it to keep testing the no-address state.
+  await mctx.addInitScript({ content: cfg + " window.LATHE_TEST_CONFIG.mainnet = { lathe: null };" });
   const mp = await mctx.newPage();
   mp.on("pageerror", (e) => errors.push(e.message));
   for (const q of ["receipt=1", "order=1", ""]) {
