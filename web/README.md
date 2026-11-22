@@ -30,7 +30,7 @@ Opening `index.html` as a file does not work: ES modules need http.
 | `logo.svg` | Copy of `assets/logo.svg`; shown large in the hero when the figure is missing. |
 | `figure.js`, `figure.css` | The hero drawing, built separately. Loaded only if present; the page works without them. |
 
-Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mono `5.2.5` from jsDelivr (`@fontsource`).
+Libraries load from CDNs, pinned: viem `2.21.0` from esm.sh, Geist and Geist Mono `5.2.5` from jsDelivr (`@fontsource`); the five `@font-face` rules are at the top of `styles.css`.
 
 ## How the tool behaves
 
